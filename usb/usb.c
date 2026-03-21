@@ -290,7 +290,7 @@ static void usb_urbSyncCompleted(usb_transfer_t *t)
 
 static void usb_msgthr(void *arg)
 {
-	unsigned port = (int)arg;
+	unsigned port = (unsigned)(uintptr_t)arg;
 	msg_rid_t rid;
 	msg_t msg;
 	usb_msg_t *umsg;
@@ -448,7 +448,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (beginthread(usb_msgthr, MSGTHR_PRIO, &usb_common.ustack, sizeof(usb_common.ustack), (void *)usb_common.port) != 0) {
+	if (beginthread(usb_msgthr, MSGTHR_PRIO, &usb_common.ustack, sizeof(usb_common.ustack), (void *)(uintptr_t)usb_common.port) != 0) {
 		log_error("Fail to run msgthr!\n");
 		return 1;
 	}
