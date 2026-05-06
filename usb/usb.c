@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include <errno.h>
+#include <sys/debug.h>
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/platform.h>
@@ -425,15 +426,19 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	debug("usb-daemon: pre-hub-init\n");
 	if (hub_init() != 0) {
 		log_error("Fail to init hub driver!\n");
+		debug("usb-daemon: hub_init fail\n");
 		return 1;
 	}
-
+	debug("usb-daemon: pre-hcd-init\n");
 	if ((usb_common.hcds = hcd_init()) == NULL) {
 		log_error("Fail to init hcds!\n");
+		debug("usb-daemon: hcd_init fail\n");
 		return 1;
 	}
+	debug("usb-daemon: post-hcd-init\n");
 
 	if (portCreate(&usb_common.port) != 0) {
 		log_error("Can't create port!\n");
