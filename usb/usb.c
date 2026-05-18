@@ -395,6 +395,22 @@ int main(int argc, char *argv[])
 	int i;
 	usb_driver_t *drv;
 
+	/* TD-12 boot-speed mitigation (2026-05-17): the usb daemon emits
+	 * many short printf calls during PCIe scan + xhci HC init + USB
+	 * device enumeration. Phoenix's libc defaults stdout to
+	 * line-buffered when attached to a tty, which makes every
+	 * `printf("...\n")` a separate `write()` syscall -> mtWrite IPC
+	 * -> pl011-tty `poolthr` -> `libtty_write` roundtrip. On a
+	 * single-core kernel that single-threaded poolthr serializes
+	 * with psh's `tcgetattr`/`tcsetpgrp` ioctls, delaying the first
+	 * shell prompt by minutes. Switch stdout to fully-buffered with
+	 * a 4 KiB buffer so all of the usb daemon's chatty progress
+	 * messages coalesce into a few large `write()` syscalls. */
+	static char usb_stdout_buf[4096];
+	static char usb_stderr_buf[4096];
+	setvbuf(stdout, usb_stdout_buf, _IOFBF, sizeof(usb_stdout_buf));
+	setvbuf(stderr, usb_stderr_buf, _IOFBF, sizeof(usb_stderr_buf));
+
 	if (mutexCreate(&usb_common.transferLock) != 0) {
 		log_error("Can't create mutex!\n");
 		return 1;
@@ -426,19 +442,14 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	debug("usb-daemon: pre-hub-init\n");
 	if (hub_init() != 0) {
 		log_error("Fail to init hub driver!\n");
-		debug("usb-daemon: hub_init fail\n");
 		return 1;
 	}
-	debug("usb-daemon: pre-hcd-init\n");
 	if ((usb_common.hcds = hcd_init()) == NULL) {
 		log_error("Fail to init hcds!\n");
-		debug("usb-daemon: hcd_init fail\n");
 		return 1;
 	}
-	debug("usb-daemon: post-hcd-init\n");
 
 	if (portCreate(&usb_common.port) != 0) {
 		log_error("Can't create port!\n");
