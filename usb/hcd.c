@@ -198,8 +198,10 @@ hcd_t *hcd_init(void)
 		debug("usb-hcd: pre ops->init\n");
 		ret = hcd->ops->init(hcd);
 		if (ret != 0) {
-			debug("usb-hcd: ops->init fail\n");
-			log_error("Fail to initialize hcd type: %s\n", info[i].type);
+			char buf[64];
+			(void)snprintf(buf, sizeof(buf), "usb-hcd: ops->init fail rc=%d\n", ret);
+			debug(buf);
+			log_error("Fail to initialize hcd type: %s rc=%d\n", info[i].type, ret);
 			hcd_free(hcd);
 			continue;
 		}
