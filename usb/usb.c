@@ -405,11 +405,16 @@ int main(int argc, char *argv[])
 	 * with psh's `tcgetattr`/`tcsetpgrp` ioctls, delaying the first
 	 * shell prompt by minutes. Switch stdout to fully-buffered with
 	 * a 4 KiB buffer so all of the usb daemon's chatty progress
-	 * messages coalesce into a few large `write()` syscalls. */
+	 * messages coalesce into a few large `write()` syscalls.
+	 *
+	 * stderr stays UNBUFFERED (2026-05-24): xhci_init / cmdExec /
+	 * runStateSelftest etc. fprintf to stderr on error; with a 4 KiB
+	 * full buffer those messages never flush before the process
+	 * exits with rc != 0, hiding the failure point. Errors are
+	 * infrequent so the boot-speed argument doesn't apply. */
 	static char usb_stdout_buf[4096];
-	static char usb_stderr_buf[4096];
 	setvbuf(stdout, usb_stdout_buf, _IOFBF, sizeof(usb_stdout_buf));
-	setvbuf(stderr, usb_stderr_buf, _IOFBF, sizeof(usb_stderr_buf));
+	setvbuf(stderr, NULL, _IONBF, 0);
 
 	if (mutexCreate(&usb_common.transferLock) != 0) {
 		log_error("Can't create mutex!\n");
