@@ -139,4 +139,13 @@ void usb_transferPut(usb_transfer_t *t);
 int usblibdrv_open(usb_driver_t *drv, usb_devinfo_t *dev, usb_transfer_type_t type, usb_dir_t dir);
 
 
+/* Run the full USB host-stack init (mutex/cond, mem, drivers, hub, hcd,
+ * port + /dev/usb, msg + status threads) without blocking — N-1 status
+ * threads are spawned via beginthread; the Nth status thread is the
+ * caller's responsibility (the standalone usb daemon runs it in main,
+ * or another process can start its own to keep work going). Returns 0
+ * on success, non-zero error code on failure (process should exit). */
+int usb_init(void);
+
+
 #endif

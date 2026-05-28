@@ -389,32 +389,16 @@ static void usb_statusthr(void *arg)
 }
 
 
-int main(int argc, char *argv[])
+/* Bring up the full USB host-stack: mutex/cond, memory, registered drivers,
+ * hub, HCDs, /dev/usb port + node, and the message + (N-1) status threads.
+ * Does NOT block: the Nth status thread is the caller's responsibility (the
+ * standalone usb daemon runs it in main; another process embedding this
+ * stack can spawn its own). Returns 0 on success, non-zero on failure. */
+int usb_init(void)
 {
 	oid_t oid;
 	int i;
 	usb_driver_t *drv;
-
-	/* TD-12 boot-speed mitigation (2026-05-17): the usb daemon emits
-	 * many short printf calls during PCIe scan + xhci HC init + USB
-	 * device enumeration. Phoenix's libc defaults stdout to
-	 * line-buffered when attached to a tty, which makes every
-	 * `printf("...\n")` a separate `write()` syscall -> mtWrite IPC
-	 * -> pl011-tty `poolthr` -> `libtty_write` roundtrip. On a
-	 * single-core kernel that single-threaded poolthr serializes
-	 * with psh's `tcgetattr`/`tcsetpgrp` ioctls, delaying the first
-	 * shell prompt by minutes. Switch stdout to fully-buffered with
-	 * a 4 KiB buffer so all of the usb daemon's chatty progress
-	 * messages coalesce into a few large `write()` syscalls.
-	 *
-	 * stderr stays UNBUFFERED (2026-05-24): xhci_init / cmdExec /
-	 * runStateSelftest etc. fprintf to stderr on error; with a 4 KiB
-	 * full buffer those messages never flush before the process
-	 * exits with rc != 0, hiding the failure point. Errors are
-	 * infrequent so the boot-speed argument doesn't apply. */
-	static char usb_stdout_buf[4096];
-	setvbuf(stdout, usb_stdout_buf, _IOFBF, sizeof(usb_stdout_buf));
-	setvbuf(stderr, NULL, _IONBF, 0);
 
 	if (mutexCreate(&usb_common.transferLock) != 0) {
 		log_error("Can't create mutex!\n");
@@ -481,6 +465,46 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	return 0;
+}
+
+
+int main(int argc, char *argv[])
+{
+	int r;
+
+	(void)argc;
+	(void)argv;
+
+	/* TD-12 boot-speed mitigation (2026-05-17): the usb daemon emits
+	 * many short printf calls during PCIe scan + xhci HC init + USB
+	 * device enumeration. Phoenix's libc defaults stdout to
+	 * line-buffered when attached to a tty, which makes every
+	 * `printf("...\n")` a separate `write()` syscall -> mtWrite IPC
+	 * -> pl011-tty `poolthr` -> `libtty_write` roundtrip. On a
+	 * single-core kernel that single-threaded poolthr serializes
+	 * with psh's `tcgetattr`/`tcsetpgrp` ioctls, delaying the first
+	 * shell prompt by minutes. Switch stdout to fully-buffered with
+	 * a 4 KiB buffer so all of the usb daemon's chatty progress
+	 * messages coalesce into a few large `write()` syscalls.
+	 *
+	 * stderr stays UNBUFFERED (2026-05-24): xhci_init / cmdExec /
+	 * runStateSelftest etc. fprintf to stderr on error; with a 4 KiB
+	 * full buffer those messages never flush before the process
+	 * exits with rc != 0, hiding the failure point. Errors are
+	 * infrequent so the boot-speed argument doesn't apply. */
+	static char usb_stdout_buf[4096];
+	setvbuf(stdout, usb_stdout_buf, _IOFBF, sizeof(usb_stdout_buf));
+	setvbuf(stderr, NULL, _IONBF, 0);
+
+	r = usb_init();
+	if (r != 0) {
+		return r;
+	}
+
+	/* Become the Nth status thread (blocking). The stack init above
+	 * spawned N-1 status threads via beginthread; this one runs in
+	 * the caller's thread. */
 	priority(STATUSTHR_PRIO);
 	usb_statusthr(NULL);
 
