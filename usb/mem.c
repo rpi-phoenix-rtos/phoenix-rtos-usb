@@ -52,16 +52,13 @@ static void *usb_allocUncached(size_t size)
 {
 	void *res;
 
-	/* MAP_CONTIGUOUS + MAP_PRIVATE matches the flags used by the
-	 * known-good Pi 4 'X' diag rig (port/diag-udp.c) and by the kernel
-	 * drivers/physmmap.c dmammap helper. On BCM2711 specifically, DMA
-	 * pages must come from a contiguous low-DRAM pool the PCIe RC's
-	 * inbound translation actually reaches; without MAP_CONTIGUOUS the
-	 * default allocator can return pages outside that reachable range
-	 * and the controller's inbound DMA writes silently disappear (see
-	 * project memory: USB FIX-14 / VL805 inbound DMA write asymmetry).
-	 * Other ports either ignore MAP_CONTIGUOUS or honor it without
-	 * cost, so this is a safe default. */
+	/* MAP_CONTIGUOUS + MAP_PRIVATE matches the flags used by the Pi 4
+	 * 'X' diag rig (port/diag-udp.c) and by the kernel
+	 * drivers/physmmap.c dmammap helper. Keep them so we're consistent
+	 * with the rig's allocator — verified to not affect rig flakiness
+	 * (the rig was flaky with both flag sets), so this is just code
+	 * hygiene. Other ports either ignore MAP_CONTIGUOUS or honor it
+	 * without cost. */
 	if ((res = mmap(NULL, size, PROT_WRITE | PROT_READ,
 		MAP_ANONYMOUS | MAP_PRIVATE | MAP_UNCACHED | MAP_CONTIGUOUS, -1, 0)) == MAP_FAILED)
 		return NULL;
