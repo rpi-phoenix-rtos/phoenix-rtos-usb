@@ -469,6 +469,12 @@ int usb_init(void)
 }
 
 
+/* When this host stack is embedded in another binary (e.g. the
+ * Phoenix-RTOS Pi 4 lwip-port PoC that hosts the USB stack to work around
+ * the per-process inbound-DMA failure on the BCM2711 PCIe RC), define
+ * USB_NO_MAIN at compile time to exclude main() — the embedding binary
+ * provides its own entry point and calls usb_init() directly. */
+#ifndef USB_NO_MAIN
 int main(int argc, char *argv[])
 {
 	int r;
@@ -510,6 +516,7 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
+#endif
 
 
 int usblibdrv_open(usb_driver_t *drv, usb_devinfo_t *dev, usb_transfer_type_t type, usb_dir_t dir)
