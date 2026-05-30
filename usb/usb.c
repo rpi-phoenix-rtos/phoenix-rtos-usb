@@ -151,6 +151,16 @@ void usb_transferFinished(usb_transfer_t *t, int status)
 	bool urbtrans = false;
 
 	mutexLock(usb_common.transferLock);
+	/* Idempotency: a transfer must be finished exactly once per submit
+	 * (usb_transferSubmit clears t->finished). A DOUBLE completion — e.g. an
+	 * error path plus a real completion, or the same transfer reported by two
+	 * event deliveries — would re-add an URB already linked in the finished ring
+	 * and corrupt it (head->prev becomes NULL, faulting lib_listAdd). If it's
+	 * already finished, this call is a duplicate; ignore it. */
+	if (t->finished) {
+		mutexUnlock(usb_common.transferLock);
+		return;
+	}
 	t->finished = true;
 
 	if (status >= 0) {
