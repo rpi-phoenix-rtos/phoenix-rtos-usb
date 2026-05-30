@@ -166,6 +166,17 @@ void usb_transferFinished(usb_transfer_t *t, int status)
 	if (t->recipient != usb_drvType_hcd) {
 		urbtrans = true;
 		t->state = urb_completed;
+		/* Defensive: the URB-completion ring is a doubly-linked circular list;
+		 * its head's prev must be non-NULL. The driver-facing URB path is newly
+		 * exercised (first device to bind a driver — the keyboard) and can leave
+		 * the list malformed (head->prev == NULL), which faults lib_listAdd. Detect
+		 * and reset to empty rather than crash the whole USB/lwip process; the
+		 * dropped entries are already corrupt. Proper fix: the URB-completion +
+		 * per-slot interrupt-pipe subsystem (tracked separately). */
+		if ((usb_common.finished != NULL) && (usb_common.finished->prev == NULL)) {
+			fprintf(stderr, "usb: URB finished-list corrupt (head->prev NULL); resetting\n");
+			usb_common.finished = NULL;
+		}
 		LIST_ADD(&usb_common.finished, t);
 	}
 
