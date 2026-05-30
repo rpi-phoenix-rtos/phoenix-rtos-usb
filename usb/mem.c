@@ -126,6 +126,36 @@ static usb_buf_t *usb_allocBuffer(void)
 }
 
 
+/* Sanity-check a free-list node before dereferencing it. A free chunk header
+ * must live inside this buffer's allocatable area, be USB_CHUNK_SIZE-aligned,
+ * and carry a size that fits. This guards against a heap overflow (an
+ * allocated buffer written past its end) that smashes an adjacent free-chunk
+ * header or buf->head — which otherwise faults here as a wild-pointer deref.
+ * NULL (end of list) is valid. */
+static int usb_chunkSane(const usb_buf_t *buf, const struct usb_chunk_hdr *hdr)
+{
+	uintptr_t base = (uintptr_t)buf;
+	uintptr_t h = (uintptr_t)hdr;
+
+	if (hdr == NULL) {
+		return 1;
+	}
+	if ((h < base + USB_CHUNK_SIZE) || (h >= base + USB_BUF_SIZE)) {
+		return 0;
+	}
+	if ((h & (USB_CHUNK_SIZE - 1)) != 0) {
+		return 0;
+	}
+	if ((hdr->size == 0) || (hdr->size > USB_BUF_SIZE - USB_CHUNK_SIZE)) {
+		return 0;
+	}
+	if (h + hdr->size > base + USB_BUF_SIZE) {
+		return 0;
+	}
+	return 1;
+}
+
+
 static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 {
 	struct usb_chunk_hdr *prev, *next, *hdr = NULL;
@@ -134,11 +164,24 @@ static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 	if (buf->freesz >= size) {
 		prev = buf->head;
 		hdr = buf->head;
-		if (hdr->size < size) {
+		if (!usb_chunkSane(buf, hdr)) {
+			/* TODO(USB-MEM): free-list head corrupted by a heap overflow — see
+			 * usb_chunkSane. Log and treat this buffer as full so we don't fault
+			 * walking a wild pointer; the leak is bounded and recoverable. */
+			fprintf(stderr, "usb_mem: free-list head corrupt: buf=%p head=%p (overflow upstream)\n",
+				(void *)buf, (void *)hdr);
+			hdr = NULL;
+		}
+		else if (hdr->size < size) {
 			hdr = hdr->next;
-			while (hdr != NULL && hdr->size < size) {
+			while (hdr != NULL && usb_chunkSane(buf, hdr) && hdr->size < size) {
 				prev = hdr;
 				hdr = hdr->next;
+			}
+			if (!usb_chunkSane(buf, hdr)) {
+				fprintf(stderr, "usb_mem: free-list node corrupt: buf=%p prev=%p next=%p (overflow upstream)\n",
+					(void *)buf, (void *)prev, (void *)hdr);
+				hdr = NULL;
 			}
 		}
 	}
@@ -193,6 +236,17 @@ void usb_free(void *ptr, size_t size)
 	buf = (usb_buf_t *)((uintptr_t)ptr & ~(USB_BUF_SIZE - 1));
 	hdr = (struct usb_chunk_hdr *)ptr;
 	mutexLock(usb_mem_common.lock);
+
+	/* If a heap overflow has corrupted this buffer's free-list (see
+	 * usb_chunkSane), the coalescing walk below would fault dereferencing a
+	 * wild next pointer. Detect it, log, and leak this chunk rather than crash
+	 * or corrupt further — bounded and recoverable. */
+	if ((buf->head != NULL) && !usb_chunkSane(buf, buf->head)) {
+		fprintf(stderr, "usb_mem: free-list corrupt on free, leaking chunk: buf=%p head=%p (overflow upstream)\n",
+			(void *)buf, (void *)buf->head);
+		mutexUnlock(usb_mem_common.lock);
+		return;
+	}
 
 	hdr->size = size;
 
