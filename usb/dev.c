@@ -34,6 +34,15 @@
 
 #define USBDEV_BUF_SIZE 0x200
 
+/* The setup packet and the control-data buffer share one DMA-pool allocation:
+ * a USBDEV_SETUP_SIZE-byte region for the setup packet, immediately followed by
+ * the USBDEV_BUF_SIZE-byte control-data buffer. The allocation must therefore be
+ * USBDEV_SETUP_SIZE + USBDEV_BUF_SIZE so a full USBDEV_BUF_SIZE-byte transfer
+ * (the largest usb_devCtrl admits) stays inside the chunk; a tighter allocation
+ * would let a config descriptor whose wTotalLength is within 32 bytes of
+ * USBDEV_BUF_SIZE overrun into the adjacent free-chunk header. */
+#define USBDEV_SETUP_SIZE 32
+
 
 typedef struct devOid {
 	struct devOid *prev, *next;
@@ -852,14 +861,14 @@ int usb_devInit(void)
 		return -ENOMEM;
 	}
 
-	if ((usbdev_common.setupBuf = usb_alloc(USBDEV_BUF_SIZE)) == NULL) {
+	if ((usbdev_common.setupBuf = usb_alloc(USBDEV_SETUP_SIZE + USBDEV_BUF_SIZE)) == NULL) {
 		resourceDestroy(usbdev_common.lock);
 		resourceDestroy(usbdev_common.cond);
 		log_error("Fail to allocate buffer!\n");
 		return -ENOMEM;
 	}
 
-	usbdev_common.ctrlBuf = usbdev_common.setupBuf + 32;
+	usbdev_common.ctrlBuf = usbdev_common.setupBuf + USBDEV_SETUP_SIZE;
 
 	return 0;
 }
