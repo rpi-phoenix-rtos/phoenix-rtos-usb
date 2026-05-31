@@ -36,7 +36,14 @@
 #include "hub.h"
 #include "log.h"
 
-#define N_STATUSTHRS   1
+/* usb_init spawns (N_STATUSTHRS - 1) URB-completion consumer threads; the
+ * standalone usb daemon's main() historically ran the Nth itself. An embedding
+ * host (the lwip-port process) calls usb_init() and then parks, so it never ran
+ * that Nth consumer — leaving usb_common.finished undrained: URB completions
+ * were never delivered to drivers (no key events) and the reused transfer
+ * corrupted the list. Spawn the consumer from usb_init so it runs regardless of
+ * how the caller behaves (the daemon main still runs an extra one harmlessly). */
+#define N_STATUSTHRS   2
 #define STATUSTHR_PRIO 3
 #define MSGTHR_PRIO    3
 
