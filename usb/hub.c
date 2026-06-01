@@ -45,6 +45,7 @@
 typedef struct _hub_event {
 	struct _hub_event *next, *prev;
 	usb_dev_t *hub;
+	int scanAll; /* TODO(#129) 1 = scan ALL ports for present devices (initial scan), ignore status bitmap */
 } hub_event_t;
 
 
@@ -386,10 +387,33 @@ static void hub_thread(void *args)
 		LIST_REMOVE(&hub_common.events, ev);
 		mutexUnlock(hub_common.lock);
 
-		status = hub_getStatus(ev->hub);
-		for (i = 0; i < ev->hub->nports; i++) {
-			if (status & (1 << (i + 1)))
-				hub_portstatus(ev->hub, i + 1);
+		if (ev->scanAll) {
+			/* TODO(#129) initial scan: connect every port reporting a present
+			 * device, independent of the interrupt status bitmap (see hub_conf).
+			 * Runs in the hub thread so downstream enumeration doesn't re-enter
+			 * the owning hub's ep0 path. */
+			for (i = 0; i < ev->hub->nports; i++) {
+				usb_port_status_t st;
+				/* Skip ports the interrupt path already enumerated: a race
+				 * between this scan and the boot-time status-change interrupt
+				 * could otherwise have hub_connectstatus disconnect+reconnect an
+				 * already-attached device (churn + frees its mbox while in use =
+				 * the #121 UAF). Only the still-empty ports need the scan. */
+				if (ev->hub->devs[i] != NULL) {
+					continue;
+				}
+				if ((hub_getPortStatus(ev->hub, i + 1, &st) == 0) &&
+						((st.wPortStatus & USB_PORT_STAT_CONNECTION) != 0)) {
+					hub_connectstatus(ev->hub, i + 1, &st);
+				}
+			}
+		}
+		else {
+			status = hub_getStatus(ev->hub);
+			for (i = 0; i < ev->hub->nports; i++) {
+				if (status & (1 << (i + 1)))
+					hub_portstatus(ev->hub, i + 1);
+			}
 		}
 
 		free(ev);
@@ -397,7 +421,7 @@ static void hub_thread(void *args)
 }
 
 
-void hub_notify(usb_dev_t *hub)
+static void hub_postEvent(usb_dev_t *hub, int scanAll)
 {
 	hub_event_t *e;
 
@@ -405,6 +429,7 @@ void hub_notify(usb_dev_t *hub)
 		return;
 
 	e->hub = hub;
+	e->scanAll = scanAll;
 
 	mutexLock(hub_common.lock);
 	LIST_ADD(&hub_common.events, e);
@@ -413,11 +438,25 @@ void hub_notify(usb_dev_t *hub)
 }
 
 
+void hub_notify(usb_dev_t *hub)
+{
+	hub_postEvent(hub, 0);
+}
+
+
+/* TODO(#129) deferred initial full-port scan — see hub_conf. */
+static void hub_notifyScan(usb_dev_t *hub)
+{
+	hub_postEvent(hub, 1);
+}
+
+
 int hub_conf(usb_dev_t *hub)
 {
 	char buf[15];
 	usb_hub_desc_t *desc;
 	int i;
+	int ret;
 
 	if (hub_setConf(hub, 1) < 0) {
 		log_error("Fail to set configuration!\n");
@@ -448,7 +487,34 @@ int hub_conf(usb_dev_t *hub)
 	if (hub_interruptInit(hub) != 0)
 		return -EINVAL;
 
-	return hub_requestStatus(hub);
+	ret = hub_requestStatus(hub);
+	if (ret < 0)
+		return ret;
+
+	/* Initial port scan (#129): enumerate devices already connected when the hub
+	 * is powered on, instead of relying solely on the interrupt status-change
+	 * pipe. The status-change endpoint reports the boot-time connect only once,
+	 * and the single in-flight status URB can miss/lose that one completion
+	 * (observed on the Pi 4 VL805: downstream kbd/mouse enumerated only ~50% of
+	 * boots while the hub itself always came up). Mainline hub drivers scan ports
+	 * after powering them; this makes boot-time enumeration deterministic, and the
+	 * interrupt pipe still drives later hotplug. The scan MUST run in the hub
+	 * thread, NOT synchronously here: hub_conf executes inside this hub's own
+	 * enumeration, and enumerating a downstream device re-entrantly would clobber
+	 * the single-slot ep0 state (xhci->cur). Posting an event defers it to the
+	 * hub thread, the same context the interrupt path uses.
+	 *
+	 * TODO(#129) DISABLED pending two underlying fixes the scan exposed:
+	 *  (1) hub_devConnected never sets hub->devs[port-1]=dev, so the dedup guard
+	 *      in the scanAll handler is inert and the scan double-enumerates ports
+	 *      the interrupt path already handled;
+	 *  (2) a failed/looping downstream enum (the LS kbd behind the TT) drives an
+	 *      unbounded `xhci: halt transition timeout` loop (observed 106k lines =
+	 *      system hang / network death). The scan turns the intermittent shallow
+	 *      boots into a deterministic hang. Re-enable once (1)+(2) are fixed. */
+	(void)hub_notifyScan; /* hub_notifyScan(hub); */
+
+	return 0;
 }
 
 
