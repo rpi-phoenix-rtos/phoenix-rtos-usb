@@ -34,6 +34,7 @@
 #include "log.h"
 
 #define HUB_ENUM_RETRIES     3
+#define HUB_ENUM_GIVEUP      3   /* TODO(#129) stop re-enumerating a port after this many failed attempts (bounds the re-enum reboot-loop) */
 #define HUB_DEBOUNCE_STABLE  100000
 #define HUB_DEBOUNCE_PERIOD  25000
 #define HUB_DEBOUNCE_TIMEOUT 1500000
@@ -325,6 +326,18 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 	if (hub->devs[port - 1] != NULL) {
 		hub_devDisconnect(hub->devs[port - 1], false);
 		hub->devs[port - 1] = NULL; /* TODO(#129) keep tracking in sync (see hub_devConnected) */
+		hub->portEnumFails[port - 1] = 0; /* a real disconnect: a fresh device may attach */
+	}
+
+	/* TODO(#129) bound the re-enum loop. A device that repeatedly fails to
+	 * enumerate (e.g. the Pi4 LS keyboard behind the VL805 hub's TT) otherwise
+	 * loops forever: each failed attempt resets the port, which re-fires a
+	 * port-status change, which re-triggers enumeration. That flood
+	 * (xhci "transfer completion timeout" x thousands) hangs/reboots the box.
+	 * After HUB_ENUM_GIVEUP consecutive failures, stop retrying this port until
+	 * the device is physically re-plugged (a disconnect clears the counter). */
+	if (hub->portEnumFails[port - 1] >= HUB_ENUM_GIVEUP) {
+		return;
 	}
 
 	pstatus = hub_portDebounce(hub, port);
@@ -334,6 +347,19 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 
 	if (pstatus) {
 		hub_devConnected(hub, port);
+		/* hub_devConnected records hub->devs[port-1] on success; NULL = failed. */
+		if (hub->devs[port - 1] == NULL) {
+			if (hub->portEnumFails[port - 1] < 255u) {
+				hub->portEnumFails[port - 1]++;
+			}
+			if (hub->portEnumFails[port - 1] == HUB_ENUM_GIVEUP) {
+				fprintf(stderr, "usb: hub port %d gave up after %d failed enum attempts\n",
+					port, HUB_ENUM_GIVEUP);
+			}
+		}
+		else {
+			hub->portEnumFails[port - 1] = 0;
+		}
 	}
 }
 
@@ -492,6 +518,11 @@ int hub_conf(usb_dev_t *hub)
 	hub->nports = min(USB_HUB_MAX_PORTS, desc->bNbrPorts);
 	if ((hub->devs = calloc(hub->nports, sizeof(usb_dev_t *))) == NULL) {
 		log_error("Out of memory!\n");
+		return -ENOMEM;
+	}
+	if ((hub->portEnumFails = calloc(hub->nports, sizeof(unsigned char))) == NULL) {
+		log_error("Out of memory!\n");
+		free(hub->devs);
 		return -ENOMEM;
 	}
 

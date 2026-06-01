@@ -73,6 +73,7 @@ typedef struct _usb_dev {
 
 	/* Hub fields */
 	struct _usb_dev **devs;
+	unsigned char *portEnumFails; /* TODO(#129) per-port consecutive enum-failure count; bounds the re-enum loop */
 	usb_transfer_t *statusTransfer;
 	usb_pipe_t *irqPipe;
 	int nports;
