@@ -77,8 +77,14 @@ void *usb_allocAligned(size_t size, size_t alignment)
 	if ((addr = usb_allocUncached(size)) == NULL)
 		return NULL;
 
-	if (va2pa(addr) % alignment == 0)
+	if (va2pa(addr) % alignment == 0) {
+		/* TODO(#129) one-line DMA-region PA log: every USB DMA allocation (chunk
+		 * pool + xHCI rings/dcbaa all route through here) so a same-boot grep can
+		 * test arithmetic containment of the lwIP mbox PAs (port/mbox.c) — proving
+		 * or refuting USB-pool/lwIP-heap physical aliasing (#26). */
+		printf("\nUSBPOOL pa=0x%llx sz=%u\n", (unsigned long long)va2pa(addr), (unsigned)size);
 		return addr;
+	}
 
 	munmap(addr, size);
 
@@ -95,6 +101,7 @@ void *usb_allocAligned(size_t size, size_t alignment)
 	if (res + size != addr + alignment * 2)
 		munmap(res + size, (addr + alignment * 2) - (res + size));
 
+	printf("\nUSBPOOL pa=0x%llx sz=%u\n", (unsigned long long)va2pa(res), (unsigned)size); /* TODO(#129) see above */
 	return res;
 }
 
