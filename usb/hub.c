@@ -308,6 +308,13 @@ static void hub_devConnected(usb_dev_t *hub, int port)
 		printf("usb: Enumeration failed despite %d attempts\n", HUB_ENUM_RETRIES);
 		hub_devDisconnect(dev, true);
 	}
+	else {
+		/* TODO(#129) record the enumerated device so the port is tracked: the
+		 * disconnect check in hub_connectstatus and the initial-scan dedup guard
+		 * both test hub->devs[port-1]. Without this it stayed NULL forever, so a
+		 * port could be (re-)enumerated twice. */
+		hub->devs[port - 1] = dev;
+	}
 }
 
 
@@ -317,6 +324,7 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 
 	if (hub->devs[port - 1] != NULL) {
 		hub_devDisconnect(hub->devs[port - 1], false);
+		hub->devs[port - 1] = NULL; /* TODO(#129) keep tracking in sync (see hub_devConnected) */
 	}
 
 	pstatus = hub_portDebounce(hub, port);
@@ -504,14 +512,16 @@ int hub_conf(usb_dev_t *hub)
 	 * the single-slot ep0 state (xhci->cur). Posting an event defers it to the
 	 * hub thread, the same context the interrupt path uses.
 	 *
-	 * TODO(#129) DISABLED pending two underlying fixes the scan exposed:
-	 *  (1) hub_devConnected never sets hub->devs[port-1]=dev, so the dedup guard
-	 *      in the scanAll handler is inert and the scan double-enumerates ports
-	 *      the interrupt path already handled;
-	 *  (2) a failed/looping downstream enum (the LS kbd behind the TT) drives an
-	 *      unbounded `xhci: halt transition timeout` loop (observed 106k lines =
-	 *      system hang / network death). The scan turns the intermittent shallow
-	 *      boots into a deterministic hang. Re-enable once (1)+(2) are fixed. */
+	 * TODO(#129) DISABLED again: even with devs[] tracking + enterHaltedState
+	 * no-op-under-keepRunning, the scan-triggered downstream enum FAILS to bind
+	 * the kbd (insertions=0) and ~50% of boots still hang/lose the network — yet
+	 * the interrupt-TRIGGERED enum of the same kbd SUCCEEDS (idemp boot bound
+	 * /dev/kbd0). Same enum code, so the difference is timing/state: the scan runs
+	 * right after hub_conf (hub just configured), likely before the hub's TT/ports
+	 * settle, so the LS-kbd-behind-TT enum fails too early. Next: try a settle
+	 * delay before the scan, or fix the hub INTERRUPT delivery instead of scanning.
+	 * NB: the enterHaltedState fix did NOT stop the hang -> there is another hang
+	 * source (mbox UAF killing TCP/IP, or another loop). */
 	(void)hub_notifyScan; /* hub_notifyScan(hub); */
 
 	return 0;
