@@ -396,10 +396,21 @@ static void hub_thread(void *args)
 		mutexUnlock(hub_common.lock);
 
 		if (ev->scanAll) {
-			/* TODO(#129) initial scan: connect every port reporting a present
-			 * device, independent of the interrupt status bitmap (see hub_conf).
-			 * Runs in the hub thread so downstream enumeration doesn't re-enter
-			 * the owning hub's ep0 path. */
+			/* TODO(#129) DELAYED FALLBACK initial scan: connect ports reporting a
+			 * present device that the interrupt path has NOT already enumerated,
+			 * independent of the interrupt status bitmap (see hub_conf). Runs in
+			 * the hub thread so downstream enumeration doesn't re-enter the owning
+			 * hub's ep0 path.
+			 *
+			 * The settle delay is essential: the interrupt status-change path is
+			 * the PRIMARY mechanism and it works when it fires; this scan only
+			 * covers the ~50% of boots where the single boot-time status-change
+			 * URB is missed. Enumerating immediately after hub_conf failed (the
+			 * hub's TT / port power-good for an LS device behind the HS hub is not
+			 * settled yet -> the kbd enum fails and can hang). Waiting lets (a) the
+			 * interrupt path enumerate first (then the devs[] guard below skips the
+			 * port, avoiding a double-enum/churn) and (b) the TT settle. */
+			usleep(2000000u);
 			for (i = 0; i < ev->hub->nports; i++) {
 				usb_port_status_t st;
 				/* Skip ports the interrupt path already enumerated: a race
@@ -522,6 +533,13 @@ int hub_conf(usb_dev_t *hub)
 	 * delay before the scan, or fix the hub INTERRUPT delivery instead of scanning.
 	 * NB: the enterHaltedState fix did NOT stop the hang -> there is another hang
 	 * source (mbox UAF killing TCP/IP, or another loop). */
+	/* TODO(#129) DISABLED: 4 scan variants (sync, async, guarded, delayed-fallback)
+	 * all consistently FAIL to bind the kbd (insertions=0) and cause intermittent
+	 * hangs, whereas the interrupt-path enum of the same kbd succeeds. The scan-
+	 * triggered enum differs from interrupt-triggered in some context/state we
+	 * have not isolated (UART captures keep truncating). Approach parked; next
+	 * session: deep UART analysis of the scan-enum bind failure, OR fix the hub
+	 * interrupt-completion delivery directly (the root of the ~50% rate). */
 	(void)hub_notifyScan; /* hub_notifyScan(hub); */
 
 	return 0;
