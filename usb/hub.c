@@ -306,7 +306,20 @@ static void hub_devConnected(usb_dev_t *hub, int port)
 	} while (ret != 0 && retries > 0);
 
 	if (ret != 0) {
-		printf("usb: Enumeration failed despite %d attempts\n", HUB_ENUM_RETRIES);
+		/* TODO(#129) bound the log volume. When the VL805/hub link flaps (the
+		 * intermittent Pi4 enumeration wall), the hub re-creates and its per-port
+		 * GIVEUP counters reset, so a downstream device can be retried thousands
+		 * of times. Logging every failure floods the UART; the back-pressure
+		 * reset-loops the box (a stability bug distinct from the enum hang). Cap
+		 * the message so the system stays up + networked even when a device never
+		 * enumerates. */
+		static unsigned enumFailLogged = 0;
+		if (enumFailLogged < 8u) {
+			printf("usb: Enumeration failed despite %d attempts\n", HUB_ENUM_RETRIES);
+			if (++enumFailLogged == 8u) {
+				printf("usb: enumeration-failure logging suppressed (link flapping)\n");
+			}
+		}
 		hub_devDisconnect(dev, true);
 	}
 	else {
