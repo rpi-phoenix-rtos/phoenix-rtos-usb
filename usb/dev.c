@@ -686,7 +686,15 @@ int usb_devEnumerate(usb_dev_t *dev)
 			return -1;
 	}
 	else if (usb_drvBind(dev, usb_devOnDrvBindCb) != 0) {
-		log_msg("Fail to match drivers for device\n");
+		log_msg("Fail to match drivers for device (devClass=%02x/%02x/%02x)\n",
+				dev->desc.bDeviceClass, dev->desc.bDeviceSubClass, dev->desc.bDeviceProtocol);
+		for (unsigned di = 0; di < dev->nifs; di++) {
+			if (dev->ifs[di].desc != NULL) {
+				log_msg("  if[%u] class=%02x subclass=%02x protocol=%02x\n", di,
+						dev->ifs[di].desc->bInterfaceClass, dev->ifs[di].desc->bInterfaceSubClass,
+						dev->ifs[di].desc->bInterfaceProtocol);
+			}
+		}
 		/* TODO: make device orphaned */
 	}
 
