@@ -13,7 +13,6 @@
 
 #include <sys/mman.h>
 #include <sys/threads.h>
-#include <sys/debug.h> /* TODO(#129) debug() = atomic single-syscall line (no interleave garble) */
 
 #include <stdint.h>
 #include <string.h>
@@ -79,11 +78,6 @@ void *usb_allocAligned(size_t size, size_t alignment)
 		return NULL;
 
 	if (va2pa(addr) % alignment == 0) {
-		/* TODO(#129) one-line DMA-region PA log: every USB DMA allocation (chunk
-		 * pool + xHCI rings/dcbaa all route through here) so a same-boot grep can
-		 * test arithmetic containment of the lwIP mbox PAs (port/mbox.c) — proving
-		 * or refuting USB-pool/lwIP-heap physical aliasing (#26). */
-		{ char d[64]; snprintf(d, sizeof(d), "USBPOOL pa=0x%llx sz=%u\n", (unsigned long long)va2pa(addr), (unsigned)size); debug(d); }
 		return addr;
 	}
 
@@ -102,7 +96,6 @@ void *usb_allocAligned(size_t size, size_t alignment)
 	if (res + size != addr + alignment * 2)
 		munmap(res + size, (addr + alignment * 2) - (res + size));
 
-	{ char d[64]; snprintf(d, sizeof(d), "USBPOOL pa=0x%llx sz=%u\n", (unsigned long long)va2pa(res), (unsigned)size); debug(d); } /* TODO(#129) see above */
 	return res;
 }
 
