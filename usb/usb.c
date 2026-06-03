@@ -503,20 +503,9 @@ int usb_init(void)
  * USB_NO_MAIN at compile time to exclude main() — the embedding binary
  * provides its own entry point and calls usb_init() directly. */
 #ifndef USB_NO_MAIN
-int main(int argc, char *argv[])
+int main(void)
 {
 	int r;
-
-	/* Pi 4 BRIDGE-ONLY split (2026-05-28): the syspage may pass
-	 * --bridge-only when this daemon's job is to do the BCM2711 PCIe
-	 * bridge bring-up and exit, leaving the xHCI controller untouched
-	 * for a later process to drive. xhci_init checks the env var and
-	 * exits after bcm2711_pcie_initVL805 returns. The other ports
-	 * (imx6ull, ia32, etc.) ignore the env since their xhci HCDs
-	 * don't read it. */
-	if ((argc > 1) && (strcmp(argv[1], "--bridge-only") == 0)) {
-		setenv("BCM2711_USB_BRIDGE_ONLY", "1", 1);
-	}
 
 	/* TD-12 boot-speed mitigation (2026-05-17): the usb daemon emits
 	 * many short printf calls during PCIe scan + xhci HC init + USB
