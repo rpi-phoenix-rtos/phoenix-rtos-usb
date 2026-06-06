@@ -46,7 +46,6 @@
 typedef struct _hub_event {
 	struct _hub_event *next, *prev;
 	usb_dev_t *hub;
-	int scanAll; /* TODO(#129) 1 = scan ALL ports for present devices (initial scan), ignore status bitmap */
 } hub_event_t;
 
 
@@ -434,44 +433,10 @@ static void hub_thread(void *args)
 		LIST_REMOVE(&hub_common.events, ev);
 		mutexUnlock(hub_common.lock);
 
-		if (ev->scanAll) {
-			/* TODO(#129) DELAYED FALLBACK initial scan: connect ports reporting a
-			 * present device that the interrupt path has NOT already enumerated,
-			 * independent of the interrupt status bitmap (see hub_conf). Runs in
-			 * the hub thread so downstream enumeration doesn't re-enter the owning
-			 * hub's ep0 path.
-			 *
-			 * The settle delay is essential: the interrupt status-change path is
-			 * the PRIMARY mechanism and it works when it fires; this scan only
-			 * covers the ~50% of boots where the single boot-time status-change
-			 * URB is missed. Enumerating immediately after hub_conf failed (the
-			 * hub's TT / port power-good for an LS device behind the HS hub is not
-			 * settled yet -> the kbd enum fails and can hang). Waiting lets (a) the
-			 * interrupt path enumerate first (then the devs[] guard below skips the
-			 * port, avoiding a double-enum/churn) and (b) the TT settle. */
-			usleep(2000000u);
-			for (i = 0; i < ev->hub->nports; i++) {
-				usb_port_status_t st;
-				/* Skip ports the interrupt path already enumerated: a race
-				 * between this scan and the boot-time status-change interrupt
-				 * could otherwise have hub_connectstatus disconnect+reconnect an
-				 * already-attached device (churn + frees its mbox while in use =
-				 * the #121 UAF). Only the still-empty ports need the scan. */
-				if (ev->hub->devs[i] != NULL) {
-					continue;
-				}
-				if ((hub_getPortStatus(ev->hub, i + 1, &st) == 0) &&
-						((st.wPortStatus & USB_PORT_STAT_CONNECTION) != 0)) {
-					hub_connectstatus(ev->hub, i + 1, &st);
-				}
-			}
-		}
-		else {
-			status = hub_getStatus(ev->hub);
-			for (i = 0; i < ev->hub->nports; i++) {
-				if (status & (1 << (i + 1)))
-					hub_portstatus(ev->hub, i + 1);
-			}
+		status = hub_getStatus(ev->hub);
+		for (i = 0; i < ev->hub->nports; i++) {
+			if (status & (1 << (i + 1)))
+				hub_portstatus(ev->hub, i + 1);
 		}
 
 		free(ev);
@@ -479,7 +444,7 @@ static void hub_thread(void *args)
 }
 
 
-static void hub_postEvent(usb_dev_t *hub, int scanAll)
+void hub_notify(usb_dev_t *hub)
 {
 	hub_event_t *e;
 
@@ -487,7 +452,6 @@ static void hub_postEvent(usb_dev_t *hub, int scanAll)
 		return;
 
 	e->hub = hub;
-	e->scanAll = scanAll;
 
 	mutexLock(hub_common.lock);
 	LIST_ADD(&hub_common.events, e);
@@ -496,25 +460,11 @@ static void hub_postEvent(usb_dev_t *hub, int scanAll)
 }
 
 
-void hub_notify(usb_dev_t *hub)
-{
-	hub_postEvent(hub, 0);
-}
-
-
-/* TODO(#129) deferred initial full-port scan — see hub_conf. */
-static void hub_notifyScan(usb_dev_t *hub)
-{
-	hub_postEvent(hub, 1);
-}
-
-
 int hub_conf(usb_dev_t *hub)
 {
 	char buf[15];
 	usb_hub_desc_t *desc;
 	int i;
-	int ret;
 
 	if (hub_setConf(hub, 1) < 0) {
 		log_error("Fail to set configuration!\n");
@@ -550,43 +500,7 @@ int hub_conf(usb_dev_t *hub)
 	if (hub_interruptInit(hub) != 0)
 		return -EINVAL;
 
-	ret = hub_requestStatus(hub);
-	if (ret < 0)
-		return ret;
-
-	/* Initial port scan (#129): enumerate devices already connected when the hub
-	 * is powered on, instead of relying solely on the interrupt status-change
-	 * pipe. The status-change endpoint reports the boot-time connect only once,
-	 * and the single in-flight status URB can miss/lose that one completion
-	 * (observed on the Pi 4 VL805: downstream kbd/mouse enumerated only ~50% of
-	 * boots while the hub itself always came up). Mainline hub drivers scan ports
-	 * after powering them; this makes boot-time enumeration deterministic, and the
-	 * interrupt pipe still drives later hotplug. The scan MUST run in the hub
-	 * thread, NOT synchronously here: hub_conf executes inside this hub's own
-	 * enumeration, and enumerating a downstream device re-entrantly would clobber
-	 * the single-slot ep0 state (xhci->cur). Posting an event defers it to the
-	 * hub thread, the same context the interrupt path uses.
-	 *
-	 * TODO(#129) DISABLED again: even with devs[] tracking + enterHaltedState
-	 * no-op-under-keepRunning, the scan-triggered downstream enum FAILS to bind
-	 * the kbd (insertions=0) and ~50% of boots still hang/lose the network — yet
-	 * the interrupt-TRIGGERED enum of the same kbd SUCCEEDS (idemp boot bound
-	 * /dev/kbd0). Same enum code, so the difference is timing/state: the scan runs
-	 * right after hub_conf (hub just configured), likely before the hub's TT/ports
-	 * settle, so the LS-kbd-behind-TT enum fails too early. Next: try a settle
-	 * delay before the scan, or fix the hub INTERRUPT delivery instead of scanning.
-	 * NB: the enterHaltedState fix did NOT stop the hang -> there is another hang
-	 * source (mbox UAF killing TCP/IP, or another loop). */
-	/* TODO(#129) DISABLED: 4 scan variants (sync, async, guarded, delayed-fallback)
-	 * all consistently FAIL to bind the kbd (insertions=0) and cause intermittent
-	 * hangs, whereas the interrupt-path enum of the same kbd succeeds. The scan-
-	 * triggered enum differs from interrupt-triggered in some context/state we
-	 * have not isolated (UART captures keep truncating). Approach parked; next
-	 * session: deep UART analysis of the scan-enum bind failure, OR fix the hub
-	 * interrupt-completion delivery directly (the root of the ~50% rate). */
-	(void)hub_notifyScan; /* hub_notifyScan(hub); */
-
-	return 0;
+	return hub_requestStatus(hub);
 }
 
 

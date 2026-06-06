@@ -12,7 +12,6 @@
  */
 
 #include <errno.h>
-#include <sys/debug.h>
 #include <sys/list.h>
 #include <sys/threads.h>
 #include <string.h>
@@ -195,27 +194,19 @@ hcd_t *hcd_init(void)
 			continue;
 		}
 
-		debug("usb-hcd: pre ops->init\n");
 		ret = hcd->ops->init(hcd);
 		if (ret != 0) {
-			char buf[64];
-			(void)snprintf(buf, sizeof(buf), "usb-hcd: ops->init fail rc=%d\n", ret);
-			debug(buf);
 			log_error("Fail to initialize hcd type: %s rc=%d\n", info[i].type, ret);
 			hcd_free(hcd);
 			continue;
 		}
-		debug("usb-hcd: post ops->init ok\n");
 
-		debug("usb-hcd: pre usb_devEnumerate\n");
 		ret = usb_devEnumerate(hcd->roothub);
 		if (ret != 0) {
-			debug("usb-hcd: usb_devEnumerate fail\n");
 			log_error("Fail to enumerate devices: %s\n", info[i].type);
 			hcd_free(hcd);
 			continue;
 		}
-		debug("usb-hcd: post usb_devEnumerate ok\n");
 
 		LIST_ADD(&res, hcd);
 	}

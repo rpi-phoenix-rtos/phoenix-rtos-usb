@@ -14,7 +14,6 @@
 #include <stdint.h>
 
 #include <errno.h>
-#include <sys/debug.h>
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/platform.h>
