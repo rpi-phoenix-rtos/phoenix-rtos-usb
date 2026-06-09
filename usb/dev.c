@@ -583,7 +583,7 @@ static void usb_devSymlinksCreate(usb_dev_t *dev, const char *devPath, int iface
 	char linkpath[32] = { 0 };
 	int ret;
 
-	sprintf(linkpath, USB_DEV_SYMLINK_FORMAT, dev->desc.idVendor, dev->desc.idProduct, iface);
+	snprintf(linkpath, sizeof(linkpath), USB_DEV_SYMLINK_FORMAT, dev->desc.idVendor, dev->desc.idProduct, iface);
 
 	unlink(linkpath);
 	ret = symlink(devPath, linkpath);
@@ -598,7 +598,7 @@ static void usb_devSymlinksDestroy(usb_dev_t *dev, int iface)
 {
 	char linkpath[32] = { 0 };
 
-	sprintf(linkpath, USB_DEV_SYMLINK_FORMAT, dev->desc.idVendor, dev->desc.idProduct, iface);
+	snprintf(linkpath, sizeof(linkpath), USB_DEV_SYMLINK_FORMAT, dev->desc.idVendor, dev->desc.idProduct, iface);
 	unlink(linkpath);
 }
 
