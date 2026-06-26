@@ -113,7 +113,7 @@ static void usb_memReportCorrupt(const usb_buf_t *buf, const struct usb_chunk_hd
 		unsigned idx = (usb_mem_common.freelogPos + i) % USB_FREELOG_DEPTH;
 		struct usb_freelog_ent *e = &usb_mem_common.freelog[idx];
 		if (e->addr != NULL) {
-			fprintf(stderr, " %p/%zu%s", e->addr, e->size,
+			fprintf(stderr, " %p/%lu%s", e->addr, (unsigned long)e->size,
 				(e->addr == (void *)hdr) ? "<==MATCH(use-after-free)" : "");
 		}
 	}
