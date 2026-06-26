@@ -21,9 +21,31 @@
 #define USB_CHUNK_SIZE 32
 #define USB_BUF_SIZE   4096
 
+/* TODO(USB-MEM): diagnostic instrumentation for issue #121 — the free-list head
+ * is intermittently found smashed with non-pointer (recycled DRAM) bytes during
+ * early USB enumeration. Static analysis has cleared every in-stack copy site
+ * (ctrlBuf/string/config descriptors, hub status, xHCI TRB programming are all
+ * length-bounded), so the writer is external to this pool's logical owners — the
+ * prime remaining hypothesis is a controller DMA write landing in a chunk that
+ * was already freed and recoalesced (a transfer buffer freed via usb_free while
+ * the xHCI still has a live TRB pointing at it). This block captures, on the next
+ * boot, enough context to discriminate that from a stray content overflow:
+ *   - the corrupt header's raw bytes (hex + ASCII), so identifiable USB
+ *     descriptor/report bytes vs. plain text name the source class, and
+ *   - a ring of the most recent usb_free() {addr,size}; if the corrupt chunk's
+ *     address matches a recently-freed buffer, it is a use-after-free.
+ * Remove once the writer is pinned and fixed. */
+#define USB_FREELOG_DEPTH 16
+
 
 struct usb_chunk_hdr {
 	struct usb_chunk_hdr *next;
+	size_t size;
+};
+
+
+struct usb_freelog_ent {
+	void *addr;
 	size_t size;
 };
 
@@ -45,7 +67,58 @@ typedef struct usb_buf {
 static struct {
 	usb_buf_t *buffer;
 	handle_t lock;
+
+	/* TODO(USB-MEM): #121 diagnostic free-log ring; see comment above. The lock
+	 * is held by every usb_free() and by the corruption-report path, so the ring
+	 * needs no separate synchronization. */
+	struct usb_freelog_ent freelog[USB_FREELOG_DEPTH];
+	unsigned freelogPos;
 } usb_mem_common;
+
+
+/* TODO(USB-MEM): #121 — record a freed chunk in the ring. Caller must hold the
+ * pool lock. */
+static void usb_freelogRecord(void *addr, size_t size)
+{
+	usb_mem_common.freelog[usb_mem_common.freelogPos].addr = addr;
+	usb_mem_common.freelog[usb_mem_common.freelogPos].size = size;
+	usb_mem_common.freelogPos = (usb_mem_common.freelogPos + 1) % USB_FREELOG_DEPTH;
+}
+
+
+/* TODO(USB-MEM): #121 — dump the bytes of a smashed free-list node plus the
+ * recent-free ring, so the next boot pins the corruption mechanism. Caller must
+ * hold the pool lock. 'hdr' is the wild pointer caught by usb_chunkSane; it may
+ * point anywhere inside the buffer, so clamp the dump to the buffer bounds. */
+static void usb_memReportCorrupt(const usb_buf_t *buf, const struct usb_chunk_hdr *hdr)
+{
+	const uint8_t *base = (const uint8_t *)buf;
+	const uint8_t *p = (const uint8_t *)hdr;
+	unsigned i;
+
+	if ((p >= base) && (p + USB_CHUNK_SIZE <= base + USB_BUF_SIZE)) {
+		fprintf(stderr, "usb_mem: corrupt node bytes @%p:", (void *)p);
+		for (i = 0; i < USB_CHUNK_SIZE; i++) {
+			fprintf(stderr, " %02x", p[i]);
+		}
+		fprintf(stderr, " | ascii: ");
+		for (i = 0; i < USB_CHUNK_SIZE; i++) {
+			fprintf(stderr, "%c", ((p[i] >= 0x20) && (p[i] < 0x7f)) ? p[i] : '.');
+		}
+		fprintf(stderr, "\n");
+	}
+
+	fprintf(stderr, "usb_mem: recent frees (newest last):");
+	for (i = 0; i < USB_FREELOG_DEPTH; i++) {
+		unsigned idx = (usb_mem_common.freelogPos + i) % USB_FREELOG_DEPTH;
+		struct usb_freelog_ent *e = &usb_mem_common.freelog[idx];
+		if (e->addr != NULL) {
+			fprintf(stderr, " %p/%zu%s", e->addr, e->size,
+				(e->addr == (void *)hdr) ? "<==MATCH(use-after-free)" : "");
+		}
+	}
+	fprintf(stderr, "\n");
+}
 
 
 static void *usb_allocUncached(size_t size)
@@ -171,6 +244,7 @@ static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 			 * walking a wild pointer; the leak is bounded and recoverable. */
 			fprintf(stderr, "usb_mem: free-list head corrupt: buf=%p head=%p (overflow upstream)\n",
 				(void *)buf, (void *)hdr);
+			usb_memReportCorrupt(buf, hdr);
 			hdr = NULL;
 		}
 		else if (hdr->size < size) {
@@ -182,6 +256,7 @@ static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 			if (!usb_chunkSane(buf, hdr)) {
 				fprintf(stderr, "usb_mem: free-list node corrupt: buf=%p prev=%p next=%p (overflow upstream)\n",
 					(void *)buf, (void *)prev, (void *)hdr);
+				usb_memReportCorrupt(buf, hdr);
 				hdr = NULL;
 			}
 		}
@@ -238,6 +313,10 @@ void usb_free(void *ptr, size_t size)
 	hdr = (struct usb_chunk_hdr *)ptr;
 	mutexLock(usb_mem_common.lock);
 
+	/* TODO(USB-MEM): #121 diagnostic — record this free so the corruption-report
+	 * path can tell whether a smashed node matches a recently-freed chunk. */
+	usb_freelogRecord(ptr, size);
+
 	/* If a heap overflow has corrupted this buffer's free-list (see
 	 * usb_chunkSane), the coalescing walk below would fault dereferencing a
 	 * wild next pointer. Detect it, log, and leak this chunk rather than crash
@@ -245,6 +324,7 @@ void usb_free(void *ptr, size_t size)
 	if ((buf->head != NULL) && !usb_chunkSane(buf, buf->head)) {
 		fprintf(stderr, "usb_mem: free-list corrupt on free, leaking chunk: buf=%p head=%p (overflow upstream)\n",
 			(void *)buf, (void *)buf->head);
+		usb_memReportCorrupt(buf, buf->head);
 		mutexUnlock(usb_mem_common.lock);
 		return;
 	}
