@@ -50,6 +50,19 @@ struct usb_freelog_ent {
 };
 
 
+/* TODO(USB-MEM): #121 diagnostic — ring of recent usb_alloc() {addr,size,caller}.
+ * When an overflow smashes a buffer header (buf->next/head), the corruption
+ * report walks this ring to find the allocation whose [addr,addr+size) abuts the
+ * smashed buffer's base — that adjacent allocation is the forward-overflow
+ * suspect, and its recorded caller PC (addr2line on prog/usb) names the writer.
+ * The free-log alone cannot do this: the writer is a live (not freed) buffer. */
+struct usb_alloclog_ent {
+	void *addr;
+	size_t size;
+	void *caller;
+};
+
+
 typedef struct usb_buf {
 	union {
 		struct {
@@ -73,6 +86,11 @@ static struct {
 	 * needs no separate synchronization. */
 	struct usb_freelog_ent freelog[USB_FREELOG_DEPTH];
 	unsigned freelogPos;
+
+	/* TODO(USB-MEM): #121 alloc ring (see struct usb_alloclog_ent). Same locking
+	 * as freelog — every usb_alloc() and the report path hold the pool lock. */
+	struct usb_alloclog_ent alloclog[USB_FREELOG_DEPTH];
+	unsigned alloclogPos;
 } usb_mem_common;
 
 
@@ -83,6 +101,18 @@ static void usb_freelogRecord(void *addr, size_t size)
 	usb_mem_common.freelog[usb_mem_common.freelogPos].addr = addr;
 	usb_mem_common.freelog[usb_mem_common.freelogPos].size = size;
 	usb_mem_common.freelogPos = (usb_mem_common.freelogPos + 1) % USB_FREELOG_DEPTH;
+}
+
+
+/* TODO(USB-MEM): #121 — record a successful alloc (addr, rounded size, and the
+ * caller that requested — hence will write into — the buffer). Caller must hold
+ * the pool lock. */
+static void usb_alloclogRecord(void *addr, size_t size, void *caller)
+{
+	usb_mem_common.alloclog[usb_mem_common.alloclogPos].addr = addr;
+	usb_mem_common.alloclog[usb_mem_common.alloclogPos].size = size;
+	usb_mem_common.alloclog[usb_mem_common.alloclogPos].caller = caller;
+	usb_mem_common.alloclogPos = (usb_mem_common.alloclogPos + 1) % USB_FREELOG_DEPTH;
 }
 
 
@@ -118,6 +148,39 @@ static void usb_memReportCorrupt(const usb_buf_t *buf, const struct usb_chunk_hd
 		}
 	}
 	fprintf(stderr, "\n");
+
+	/* #121: name the forward-overflow writer. The buffer header (buf->next at
+	 * offset 0, buf->head at offset USB_CHUNK_SIZE) is the first thing an
+	 * adjacent-buffer overflow hits, so the suspect is the allocation whose
+	 * [addr, addr+size) ends at this buffer's base. Flag it; its caller PC
+	 * (addr2line prog/usb) is the writer. Reads only the static ring + plain
+	 * arithmetic — no wild deref, so this never faults. */
+	fprintf(stderr, "usb_mem: buf base=%p size=%u; recent allocs (newest last):",
+		(const void *)buf, (unsigned)USB_BUF_SIZE);
+	for (i = 0; i < USB_FREELOG_DEPTH; i++) {
+		unsigned idx = (usb_mem_common.alloclogPos + i) % USB_FREELOG_DEPTH;
+		struct usb_alloclog_ent *e = &usb_mem_common.alloclog[idx];
+		if (e->addr != NULL) {
+			int adjacent = ((uintptr_t)e->addr + e->size == (uintptr_t)buf);
+			fprintf(stderr, " [%p/%lu caller=%p%s]", e->addr, (unsigned long)e->size,
+				e->caller, adjacent ? " <==ADJACENT(overflow suspect)" : "");
+		}
+	}
+	fprintf(stderr, "\n");
+}
+
+
+/* A usb_buf_t* must be USB_BUF_SIZE-aligned (every pool buffer comes from
+ * usb_allocAligned(USB_BUF_SIZE, USB_BUF_SIZE)). An overflow that smashes a
+ * buffer header's buf->next field (offset 0) leaves a non-aligned wild pointer
+ * there; reject it before usb_allocFrom recurses into it and faults dereferencing
+ * string bytes as a usb_buf_t (#121). NULL is valid (end of the buffer chain). */
+static int usb_bufSane(const usb_buf_t *buf)
+{
+	if (buf == NULL) {
+		return 1;
+	}
+	return (((uintptr_t)buf & (USB_BUF_SIZE - 1)) == 0) ? 1 : 0;
 }
 
 
@@ -264,6 +327,20 @@ static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 
 	/* No big enough chunks in this buffer */
 	if (hdr == NULL) {
+		/* buf->next lives at offset 0 of the buffer header — the first field an
+		 * adjacent-buffer forward overflow smashes (#121). usb_chunkSane only
+		 * validates chunk headers, not the buffer pointer, so guard buf->next
+		 * here or the recursion below faults dereferencing string bytes as a
+		 * usb_buf_t (the observed EL0 Data Abort at usb_allocFrom "buf->freesz").
+		 * Treat a smashed link as end-of-chain: log, report, leak the rest of the
+		 * chain (bounded) rather than crash the daemon mid-enumeration. */
+		if (!usb_bufSane(buf->next)) {
+			fprintf(stderr, "usb_mem: buf->next corrupt, leaking chain: buf=%p next=%p (overflow upstream)\n",
+				(void *)buf, (void *)buf->next);
+			usb_memReportCorrupt(buf, (const struct usb_chunk_hdr *)buf->next);
+			return NULL;
+		}
+
 		/* Alloc next buffer */
 		if (buf->next == NULL) {
 			if ((buf->next = usb_allocBuffer()) == NULL)
@@ -385,6 +462,12 @@ void *usb_alloc(size_t size)
 
 	mutexLock(usb_mem_common.lock);
 	ret = usb_allocFrom(usb_mem_common.buffer, size);
+	if (ret != NULL) {
+		/* #121: record the requester so the corruption report can name the
+		 * forward-overflow writer (the caller that overflows the buffer it just
+		 * got). __builtin_return_address(0) is usb_alloc's caller = that owner. */
+		usb_alloclogRecord(ret, size, __builtin_return_address(0));
+	}
 	mutexUnlock(usb_mem_common.lock);
 
 	return ret;
