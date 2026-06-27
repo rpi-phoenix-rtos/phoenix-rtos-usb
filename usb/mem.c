@@ -199,6 +199,24 @@ static void *usb_allocUncached(size_t size)
 		MAP_ANONYMOUS | MAP_PRIVATE | MAP_UNCACHED | MAP_CONTIGUOUS, -1, 0)) == MAP_FAILED)
 		return NULL;
 
+	/* #121: evict stale dirty cache lines a prior (cached) owner left on these
+	 * recycled physical pages. Otherwise those lines write back over our uncached
+	 * DMA data and corrupt the pool/contexts — observed as foreign banner strings
+	 * ("Raspberry", "PWM1 jack @", "Phoenix Systems") smashing buf->next/head,
+	 * intermittently failing USB init ("Fail to init hcds"). dc civac is EL0-legal
+	 * (SCTLR_EL1.UCI) and, on the A72's PIPT D-cache, cleans+invalidates the line
+	 * for the physical address regardless of this mapping's uncached attribute, so
+	 * the eviction lands even though we read/write the page uncached. Done once,
+	 * right after mmap, before the buffer is initialised or DMA'd. */
+	{
+		uintptr_t a = (uintptr_t)res & ~63UL;
+		uintptr_t e = (uintptr_t)res + size;
+		for (; a < e; a += 64UL) {
+			__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+		}
+		__asm__ volatile("dsb sy" : : : "memory");
+	}
+
 	return res;
 }
 
