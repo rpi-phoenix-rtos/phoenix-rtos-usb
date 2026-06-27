@@ -214,6 +214,19 @@ int hub_portReset(usb_dev_t *hub, int port, usb_port_status_t *status)
 	if (hub_clearPortFeatures(hub, port, status->wPortChange) < 0)
 		return -1;
 
+	/* TRSTRCY reset-recovery delay (USB 2.0 §7.1.7.5): after a port reset the
+	 * device must be given >= 10 ms before it will respond to SET_ADDRESS. Linux
+	 * waits ~50 ms here (10 ms TRSTRCY + margin; drivers/usb/core/hub.c done:)
+	 * before addressing the device. Without it the xHCI AddressDevice issued to a
+	 * freshly-reset device on the Pi4's VL805 intermittently never completes (the
+	 * device is not yet ready to be addressed) — EnableSlot succeeds (controller-
+	 * internal) but AddressDevice gets no completion, the ~3/4 cold-boot enum wall
+	 * (#129). The framework calls usb_devEnumerate (EnableSlot + AddressDevice)
+	 * immediately after this returns, so the recovery wait belongs here. */
+	if (retries > 0) {
+		usleep(50000);
+	}
+
 	return (retries > 0) ? 0 : -1;
 }
 
