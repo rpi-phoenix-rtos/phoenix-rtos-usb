@@ -174,6 +174,7 @@ void usb_devFree(usb_dev_t *dev)
 
 	free(dev->ifs);
 	free(dev->devs);
+	free(dev->portEnumFails);
 	free(dev);
 }
 
