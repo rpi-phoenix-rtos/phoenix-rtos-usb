@@ -353,6 +353,11 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 		hub->devs[port - 1] = NULL; /* TODO(#129) keep tracking in sync (see hub_devConnected) */
 		hub->portEnumFails[port - 1] = 0; /* a real disconnect: a fresh device may attach */
 	}
+	else if ((status->wPortStatus & USB_PORT_STAT_CONNECTION) == 0) {
+		/* Port emptied but no device was ever tracked (it gave up mid-enum, so
+		 * devs[] stayed NULL): still clear the counter so a re-plug re-enumerates. */
+		hub->portEnumFails[port - 1] = 0;
+	}
 
 	/* TODO(#129) bound the re-enum loop. A device that repeatedly fails to
 	 * enumerate (e.g. the Pi4 LS keyboard behind the VL805 hub's TT) otherwise
@@ -361,7 +366,8 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 	 * (xhci "transfer completion timeout" x thousands) hangs/reboots the box.
 	 * After HUB_ENUM_GIVEUP consecutive failures, stop retrying this port until
 	 * the device is physically re-plugged (a disconnect clears the counter). */
-	if (hub->portEnumFails[port - 1] >= HUB_ENUM_GIVEUP) {
+	if (((status->wPortStatus & USB_PORT_STAT_CONNECTION) != 0) &&
+			(hub->portEnumFails[port - 1] >= HUB_ENUM_GIVEUP)) {
 		return;
 	}
 
@@ -506,6 +512,9 @@ int hub_conf(usb_dev_t *hub)
 		if (hub_setPortPower(hub, i + 1) < 0) {
 			log_error("Fail to set port %d power!\n", i + 1);
 			free(hub->devs);
+			free(hub->portEnumFails);
+			hub->devs = NULL;
+			hub->portEnumFails = NULL;
 			return -EINVAL;
 		}
 	}
