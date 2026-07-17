@@ -139,6 +139,7 @@ static usb_pipe_t *_usb_drvPipeOpen(usb_drvpriv_t *drv, hcd_t *hcd, int location
 			if ((desc[i].bmAttributes & 0x3) == type && (desc[i].bEndpointAddress >> 7) == dir) {
 				if ((pipe = usb_pipeAlloc(drv, dev, &desc[i])) == NULL)
 					return NULL;
+				break;
 			}
 		}
 	}
@@ -618,6 +619,7 @@ static int _usb_handleUrb(msg_t *msg, unsigned int port, unsigned long rid)
 	}
 	else {
 		log_error("urb handler/recipient type mismatch\n");
+		usb_transferFree(t);
 		return -EINVAL;
 	}
 	t->pipeid = urb->pipe;

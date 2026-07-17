@@ -447,6 +447,11 @@ int usb_init(void)
 		return 1;
 	}
 
+	if (usb_drvInit() != 0) {
+		log_error("Failed to init drv!\n");
+		return 1;
+	}
+
 	for (;;) {
 		drv = usb_registeredDriverPop();
 		if (drv != NULL) {
