@@ -501,11 +501,12 @@ int usb_init(void)
 }
 
 
-/* When this host stack is embedded in another binary (e.g. the
- * Phoenix-RTOS Pi 4 lwip-port PoC that hosts the USB stack to work around
- * the per-process inbound-DMA failure on the BCM2711 PCIe RC), define
- * USB_NO_MAIN at compile time to exclude main() — the embedding binary
- * provides its own entry point and calls usb_init() directly. */
+/* When this host stack is embedded in another binary, define USB_NO_MAIN
+ * at compile time to exclude main() — the embedding binary provides its own
+ * entry point and calls usb_init() directly. On the Phoenix-RTOS Pi 4 the
+ * USB host stack is hosted inside the lwip-port process (flagged
+ * LWIP_EMBED_USB); that is a PoC packaging shortcut to avoid shipping a
+ * separate USB daemon, not a silicon workaround. */
 #ifndef USB_NO_MAIN
 int main(void)
 {
@@ -523,8 +524,8 @@ int main(void)
 	 * a 4 KiB buffer so all of the usb daemon's chatty progress
 	 * messages coalesce into a few large `write()` syscalls.
 	 *
-	 * stderr stays UNBUFFERED (2026-05-24): xhci_init / cmdExec /
-	 * runStateSelftest etc. fprintf to stderr on error; with a 4 KiB
+	 * stderr stays UNBUFFERED (2026-05-24): xhci_init / cmdExec etc.
+	 * fprintf to stderr on error; with a 4 KiB
 	 * full buffer those messages never flush before the process
 	 * exits with rc != 0, hiding the failure point. Errors are
 	 * infrequent so the boot-speed argument doesn't apply. */

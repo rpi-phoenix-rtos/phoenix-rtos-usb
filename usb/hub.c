@@ -34,7 +34,7 @@
 #include "log.h"
 
 #define HUB_ENUM_RETRIES     3
-#define HUB_ENUM_GIVEUP      3   /* TODO(#129) stop re-enumerating a port after this many failed attempts (bounds the re-enum reboot-loop) */
+#define HUB_ENUM_GIVEUP      3   /* stop re-enumerating a port after this many failed attempts (bounds the re-enum reboot-loop) */
 #define HUB_DEBOUNCE_STABLE  100000
 #define HUB_DEBOUNCE_PERIOD  25000
 #define HUB_DEBOUNCE_TIMEOUT 1500000
@@ -318,7 +318,7 @@ static void hub_devConnected(usb_dev_t *hub, int port)
 	} while (ret != 0 && retries > 0);
 
 	if (ret != 0) {
-		/* TODO(#129) bound the log volume. When the VL805/hub link flaps (the
+		/* Bound the log volume. When the VL805/hub link flaps (the
 		 * intermittent Pi4 enumeration wall), the hub re-creates and its per-port
 		 * GIVEUP counters reset, so a downstream device can be retried thousands
 		 * of times. Logging every failure floods the UART; the back-pressure
@@ -335,7 +335,7 @@ static void hub_devConnected(usb_dev_t *hub, int port)
 		hub_devDisconnect(dev, true);
 	}
 	else {
-		/* TODO(#129) record the enumerated device so the port is tracked: the
+		/* Record the enumerated device so the port is tracked: the
 		 * disconnect check in hub_connectstatus and the initial-scan dedup guard
 		 * both test hub->devs[port-1]. Without this it stayed NULL forever, so a
 		 * port could be (re-)enumerated twice. */
@@ -350,7 +350,7 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 
 	if (hub->devs[port - 1] != NULL) {
 		hub_devDisconnect(hub->devs[port - 1], false);
-		hub->devs[port - 1] = NULL; /* TODO(#129) keep tracking in sync (see hub_devConnected) */
+		hub->devs[port - 1] = NULL; /* keep tracking in sync (see hub_devConnected) */
 		hub->portEnumFails[port - 1] = 0; /* a real disconnect: a fresh device may attach */
 	}
 	else if ((status->wPortStatus & USB_PORT_STAT_CONNECTION) == 0) {
@@ -359,7 +359,7 @@ static void hub_connectstatus(usb_dev_t *hub, int port, usb_port_status_t *statu
 		hub->portEnumFails[port - 1] = 0;
 	}
 
-	/* TODO(#129) bound the re-enum loop. A device that repeatedly fails to
+	/* Bound the re-enum loop. A device that repeatedly fails to
 	 * enumerate (e.g. the Pi4 LS keyboard behind the VL805 hub's TT) otherwise
 	 * loops forever: each failed attempt resets the port, which re-fires a
 	 * port-status change, which re-triggers enumeration. That flood

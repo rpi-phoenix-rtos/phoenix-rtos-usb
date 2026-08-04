@@ -188,13 +188,11 @@ static void *usb_allocUncached(size_t size)
 {
 	void *res;
 
-	/* MAP_CONTIGUOUS + MAP_PRIVATE matches the flags used by the Pi 4
-	 * 'X' diag rig (port/diag-udp.c) and by the kernel
-	 * drivers/physmmap.c dmammap helper. Keep them so we're consistent
-	 * with the rig's allocator — verified to not affect rig flakiness
-	 * (the rig was flaky with both flag sets), so this is just code
-	 * hygiene. Other ports either ignore MAP_CONTIGUOUS or honor it
-	 * without cost. */
+	/* MAP_CONTIGUOUS + MAP_PRIVATE matches the flags used by the kernel
+	 * drivers/physmmap.c dmammap helper. Keep the allocator consistent
+	 * with that path; the flags don't affect correctness here — other
+	 * ports either ignore MAP_CONTIGUOUS or honor it without cost — so
+	 * this is just code hygiene. */
 	if ((res = mmap(NULL, size, PROT_WRITE | PROT_READ,
 		MAP_ANONYMOUS | MAP_PRIVATE | MAP_UNCACHED | MAP_CONTIGUOUS, -1, 0)) == MAP_FAILED)
 		return NULL;
