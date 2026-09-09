@@ -547,7 +547,10 @@ int main(void)
 	/* Become the Nth status thread (blocking). The stack init above
 	 * spawned N-1 status threads via beginthread; this one runs in
 	 * the caller's thread. */
-	priority(STATUSTHR_PRIO);
+	if (setPriority(STATUSTHR_PRIO) < 0) {
+		log_error("Failed to set status thread priority to %d!\n", STATUSTHR_PRIO);
+		return 1;
+	}
 	usb_statusthr(NULL);
 
 	return 0;
