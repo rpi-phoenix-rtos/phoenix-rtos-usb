@@ -106,7 +106,7 @@ static int usb_connect(usb_driver_t *drv)
 }
 
 
-__attribute__((noreturn)) void usb_driverProcRun(usb_driver_t *drv, unsigned int prio, unsigned int nthreads, void *args)
+__attribute__((noreturn)) void usb_driverProcRun(usb_driver_t *drv, int prio, unsigned int nthreads, void *args)
 {
 	oid_t oid;
 	int ret, i;
@@ -150,7 +150,11 @@ __attribute__((noreturn)) void usb_driverProcRun(usb_driver_t *drv, unsigned int
 		}
 	}
 
-	priority(prio);
+	if (setPriority(prio) < 0) {
+		log_error("%s: failed to set priority to %d\n", drv->name, prio);
+		exit(1);
+	}
+
 	usb_thread(drv);
 }
 

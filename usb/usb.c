@@ -443,7 +443,7 @@ int usb_init(void)
 	}
 
 	if (usb_devInit() != 0) {
-		log_error("Fail to init devices!\n");
+		log_error("Failed to init devices!\n");
 		return 1;
 	}
 
@@ -464,11 +464,11 @@ int usb_init(void)
 	}
 
 	if (hub_init() != 0) {
-		log_error("Fail to init hub driver!\n");
+		log_error("Failed to init hub driver!\n");
 		return 1;
 	}
 	if ((usb_common.hcds = hcd_init()) == NULL) {
-		log_error("Fail to init hcds!\n");
+		log_error("Failed to init hcds!\n");
 		return 1;
 	}
 
@@ -486,16 +486,22 @@ int usb_init(void)
 	}
 
 	if (beginthread(usb_msgthr, MSGTHR_PRIO, &usb_common.ustack, sizeof(usb_common.ustack), (void *)(uintptr_t)usb_common.port) != 0) {
-		log_error("Fail to run msgthr!\n");
+		log_error("Failed to run msgthr!\n");
 		return 1;
 	}
 
 	for (i = 0; i < N_STATUSTHRS - 1; i++) {
 		if (beginthread(usb_statusthr, STATUSTHR_PRIO, &usb_common.stack[i], sizeof(usb_common.stack[i]), NULL) != 0) {
-			log_error("Fail to init hub driver!\n");
+			log_error("Failed to init hub driver!\n");
 			return 1;
 		}
 	}
+
+	if (setPriority(STATUSTHR_PRIO) < 0) {
+		log_error("Failed to set status thread priority to %d!\n", STATUSTHR_PRIO);
+		return 1;
+	}
+
 
 	return 0;
 }
