@@ -46,11 +46,28 @@
 #define STATUSTHR_PRIO 3
 #define MSGTHR_PRIO    3
 
+/* Both threads here run a DEEP chain -- msgRecv/status -> device enumeration ->
+ * class drivers (usbkbd/usbmouse are hosted in-process via USB_HOSTDRV_LIBS) ->
+ * DMA pool -- on what used to be 2 KB.
+ *
+ * These stacks are adjacent buffers in .bss with NO guard page, so an overflow
+ * does not fault: it silently clobbers the neighbouring thread's stack, or the
+ * global next to it, and surfaces as a crash somewhere unrelated. That is not
+ * hypothetical on this port -- #120 was exactly this shape (an 8 KB storage
+ * pool stack overflowing into its neighbour, misdiagnosed as an ext2 bug), and
+ * the 2026-06-08 pool-thread audit (docs/done/2026-06-08-pool-thread-stack-audit.md)
+ * flagged these two as the one remaining RISK row and recommended 16-32 KB.
+ *
+ * 32 KB, the top of that range: the whole change costs ~60 KB of .bss on a 4 GB
+ * board, and the failure mode being silent is precisely why the margin should
+ * not be tight. */
+#define USB_THREAD_STACKSZ (32 * 1024)
+
 
 static struct {
-	char ustack[2048] __attribute__((aligned(8)));
+	char ustack[USB_THREAD_STACKSZ] __attribute__((aligned(8)));
 	uint32_t port;
-	char stack[N_STATUSTHRS - 1][2048] __attribute__((aligned(8)));
+	char stack[N_STATUSTHRS - 1][USB_THREAD_STACKSZ] __attribute__((aligned(8)));
 	handle_t transferLock;
 	handle_t finishedCond;
 	hcd_t *hcds;
