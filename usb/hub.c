@@ -295,7 +295,11 @@ static void hub_devConnected(usb_dev_t *hub, int port)
 			break;
 		}
 
-		if (status.wPortStatus & USB_PORT_STAT_HIGH_SPEED)
+		/* SUPER first: it is encoded as LOW|HIGH (see hub.h), so testing
+		 * HIGH before it would report a SuperSpeed port as High Speed. */
+		if ((status.wPortStatus & USB_PORT_STAT_SUPER_SPEED) == USB_PORT_STAT_SUPER_SPEED)
+			dev->speed = usb_super_speed;
+		else if (status.wPortStatus & USB_PORT_STAT_HIGH_SPEED)
 			dev->speed = usb_high_speed;
 		else if (status.wPortStatus & USB_PORT_STAT_LOW_SPEED)
 			dev->speed = usb_low_speed;

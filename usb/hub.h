@@ -30,6 +30,18 @@
 #define USB_PORT_STAT_TEST        0x0800
 #define USB_PORT_STAT_INDICATOR   0x1000
 
+/* SuperSpeed has no encoding in the USB 2.0 hub port-status word: bits 9 and 10
+ * are the only speed bits and they mean LOW and HIGH. A real USB 3.x hub reports
+ * an entirely different status structure (USB 3.2 section 10.16.2.6) that this
+ * framework does not parse.
+ *
+ * A host controller's ROOT-hub emulation still has to say "this port linked up
+ * at SuperSpeed", so reserve the LOW|HIGH combination -- impossible on the wire,
+ * a port cannot be both -- exactly as Linux does with USB_PORT_STAT_SUPER_SPEED
+ * in drivers/usb/core/hub.h. This is a Phoenix roothub-emulation convention, not
+ * a wire value; it must be tested BEFORE the individual LOW/HIGH bits. */
+#define USB_PORT_STAT_SUPER_SPEED (USB_PORT_STAT_LOW_SPEED | USB_PORT_STAT_HIGH_SPEED)
+
 #define USB_PORT_STAT_C_CONNECTION  0x01
 #define USB_PORT_STAT_C_ENABLE      0x02
 #define USB_PORT_STAT_C_SUSPEND     0x04

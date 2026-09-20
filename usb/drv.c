@@ -133,14 +133,36 @@ static usb_pipe_t *_usb_drvPipeOpen(usb_drvpriv_t *drv, hcd_t *hcd, int location
 		memcpy(pipe, dev->ctrlPipe, sizeof(usb_pipe_t));
 		pipe->hcdpriv = NULL;
 	}
-	else {
-		/* Search interface descriptor for this endpoint */
-		for (i = 0; i < iface->desc->bNumEndpoints; i++) {
-			if ((desc[i].bmAttributes & 0x3) == type && (desc[i].bEndpointAddress >> 7) == dir) {
-				if ((pipe = usb_pipeAlloc(drv, dev, &desc[i])) == NULL)
-					return NULL;
+	else if (desc != NULL && dev->conf != NULL) {
+		/* Search the interface's endpoint descriptors for this endpoint.
+		 *
+		 * Walk by bLength rather than indexing eps[] as an array. A SuperSpeed
+		 * configuration puts a 6-byte Endpoint Companion descriptor after EVERY
+		 * endpoint descriptor (USB 3.2 section 9.6.7), so the endpoint
+		 * descriptors are not contiguous: eps[1] would land on a companion,
+		 * whose bmAttributes reads as "control" and whose bEndpointAddress byte
+		 * is really bMaxBurst. A mass-storage device's bulk-OUT pipe would then
+		 * never be found, and usb_open() would fail on a healthy device. */
+		char *end = (char *)dev->conf + dev->conf->wTotalLength;
+		char *ptr = (char *)desc;
+
+		for (i = 0; i < iface->desc->bNumEndpoints; ) {
+			struct usb_desc_header *hdr = (struct usb_desc_header *)ptr;
+
+			if ((ptr + sizeof(*hdr) > end) || (hdr->bLength < sizeof(*hdr)) || (ptr + hdr->bLength > end))
 				break;
+
+			if (hdr->bDescriptorType == USB_DESC_ENDPOINT) {
+				desc = (usb_endpoint_desc_t *)ptr;
+				i++;
+				if ((desc->bmAttributes & 0x3) == type && (desc->bEndpointAddress >> 7) == dir) {
+					if ((pipe = usb_pipeAlloc(drv, dev, desc)) == NULL)
+						return NULL;
+					break;
+				}
 			}
+
+			ptr += hdr->bLength;
 		}
 	}
 

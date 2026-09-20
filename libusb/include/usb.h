@@ -78,6 +78,7 @@
 #define USB_DESC_TYPE_HID_REPORT       0x22
 #define USB_DESC_TYPE_CDC_CS_INTERFACE 0x24
 #define USB_DESC_TYPE_HUB              0x29
+#define USB_DESC_ENDPOINT_SS_COMPANION 0x30
 
 
 /* endpoint types */
@@ -192,6 +193,26 @@ typedef struct {
 	uint16_t wMaxPacketSize;  /* maximum packet size */
 	uint8_t bInterval;        /* polling interval for data transfers */
 } __attribute__((packed)) usb_endpoint_desc_t;
+
+
+/* SuperSpeed Endpoint Companion descriptor (USB 3.2 section 9.6.7).
+ *
+ * A SuperSpeed configuration descriptor interleaves one of these AFTER every
+ * endpoint descriptor, so the endpoint descriptors of an interface are no
+ * longer contiguous -- anything that walks them as an array must step by
+ * bLength instead (see _usb_drvPipeOpen).
+ *
+ * bMaxBurst is "packets per burst minus one" (0 = 1 packet, 15 = 16 packets).
+ * It is where SuperSpeed throughput comes from: a burst of N moves N packets
+ * per handshake, so a host controller that leaves it at 0 runs a 5 Gbps link
+ * one packet at a time. */
+typedef struct {
+	uint8_t bLength;          /* size of descriptor (6) */
+	uint8_t bDescriptorType;  /* USB_DESC_ENDPOINT_SS_COMPANION */
+	uint8_t bMaxBurst;        /* max packets per burst, minus one */
+	uint8_t bmAttributes;     /* bulk: MaxStreams exponent; isoc: Mult */
+	uint16_t wBytesPerInterval; /* periodic endpoints only */
+} __attribute__((packed)) usb_ss_endpoint_companion_desc_t;
 
 
 /* generic descriptor

@@ -267,6 +267,7 @@ static int usb_getConfiguration(usb_dev_t *dev)
 
 
 	int lastIfNum = -1;
+	int lastIfEps = 0;
 	uint8_t lastAlternateSetting = 0;
 	while ((size >= (int)sizeof(struct usb_desc_header)) && (ret == 0)) {
 		uint8_t len = ((struct usb_desc_header *)ptr)->bLength;
@@ -282,6 +283,7 @@ static int usb_getConfiguration(usb_dev_t *dev)
 					usb_interface_desc_t *desc = (usb_interface_desc_t *)ptr;
 					lastIfNum = desc->bInterfaceNumber;
 					lastAlternateSetting = desc->bAlternateSetting;
+					lastIfEps = 0;
 					if (lastIfNum >= dev->nifs) {
 						/* Invalid interface number */
 						ret = -1;
@@ -313,20 +315,41 @@ static int usb_getConfiguration(usb_dev_t *dev)
 					}
 					else if (dev->ifs[lastIfNum].eps == NULL) {
 						dev->ifs[lastIfNum].eps = (usb_endpoint_desc_t *)ptr;
+						lastIfEps = 1;
 						if (size < (dev->ifs[lastIfNum].desc->bNumEndpoints * sizeof(usb_endpoint_desc_t))) {
 							ret = -1;
 							break;
 						}
 					}
-					else if (ptr >= (char *)(dev->ifs[lastIfNum].eps + dev->ifs[lastIfNum].desc->bNumEndpoints)) {
-						ret = -1;
-						break;
+					else {
+						/* Count the endpoint descriptors instead of comparing
+						 * `ptr` against eps + bNumEndpoints. That comparison
+						 * assumed they are CONTIGUOUS, which a SuperSpeed
+						 * configuration breaks: it interleaves a 6-byte
+						 * Endpoint Companion descriptor after each one, so the
+						 * last endpoint of a 3-endpoint interface sits beyond
+						 * the assumed array and was rejected as malformed. */
+						lastIfEps++;
+						if (lastIfEps > dev->ifs[lastIfNum].desc->bNumEndpoints) {
+							log_error("Too many endpoint descriptors for interface %d", lastIfNum);
+							ret = -1;
+							break;
+						}
 					}
 				}
 				else {
 					log_error("Endpoint descriptor with invalid size");
 					ret = -1;
 				}
+				break;
+
+			case USB_DESC_ENDPOINT_SS_COMPANION:
+				/* Belongs to the endpoint descriptor immediately before it and
+				 * is located by walking from there (_usb_drvPipeOpen, and the
+				 * xHCI HCD's Max Burst lookup), so nothing is stored. It still
+				 * has to be recognised here: the default branch would file it
+				 * as the interface's class-specific functional descriptor and
+				 * overwrite a real one. */
 				break;
 
 			case USB_DESC_INTERFACE_ASSOCIATION:
@@ -647,8 +670,21 @@ int usb_devEnumerate(usb_dev_t *dev)
 		return -1;
 	}
 
-	/* First one is always control */
-	dev->ctrlPipe->maxPacketLen = dev->desc.bMaxPacketSize0;
+	/* First one is always control.
+	 *
+	 * On SuperSpeed bMaxPacketSize0 is an EXPONENT, not a byte count (USB 3.2
+	 * section 9.6.1): the only legal value is 9, meaning 2^9 = 512. Reading it
+	 * the USB 2 way gives a 9-byte ep0 and every control transfer after the
+	 * first descriptor read fails. */
+	if (dev->speed == usb_super_speed) {
+		/* Clamped rather than shifted blindly: a descriptor read that went
+		 * wrong would otherwise turn into an absurd (or undefined) shift. */
+		dev->ctrlPipe->maxPacketLen = (dev->desc.bMaxPacketSize0 <= 9) ?
+			(1 << dev->desc.bMaxPacketSize0) : 512;
+	}
+	else {
+		dev->ctrlPipe->maxPacketLen = dev->desc.bMaxPacketSize0;
+	}
 
 	if ((addr = hcd_addrAlloc(dev->hcd)) < 0) {
 		log_error("Fail to add device to hcd\n");

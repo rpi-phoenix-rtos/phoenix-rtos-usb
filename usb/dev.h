@@ -21,9 +21,13 @@
 #include "usbhost.h"
 
 
+/* Appended, never renumbered: ehci.c puts this value straight into a queue-head
+ * field (qh->hw->info[0] |= speed << 12), so the existing three must keep their
+ * encoding. An EHCI controller never reports usb_super_speed. */
 enum usb_speed { usb_full_speed = 0,
 	usb_low_speed,
-	usb_high_speed };
+	usb_high_speed,
+	usb_super_speed };
 
 
 typedef struct {
