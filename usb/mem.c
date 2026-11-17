@@ -100,7 +100,19 @@ static int usb_bufSane(const usb_buf_t *buf)
 }
 
 
-static void *usb_allocUncached(size_t size)
+#if defined(__TARGET_AARCH64A72)
+/* Raspberry Pi 4: the VL805 host controller behind the BCM2711 PCIe bridge
+ * returns wrong data for DMA above 3 GiB, even though the inbound window covers
+ * 4 GiB (the device tree's dma-ranges stops at 3 GiB). It shows only under
+ * memory pressure: silently corrupted reads, then an xHCI Host System Error. */
+#define USB_DMA_LIMIT 0xc0000000ULL
+#endif
+
+/* Rejected allocations are held while retrying, so the allocator hands out other pages */
+#define USB_DMA_RETRIES 32
+
+
+static void *usb_mmapUncached(size_t size)
 {
 	void *res;
 
@@ -132,6 +144,41 @@ static void *usb_allocUncached(size_t size)
 	}
 
 	return res;
+}
+
+
+static void *usb_allocUncached(size_t size)
+{
+#ifdef USB_DMA_LIMIT
+	void *held[USB_DMA_RETRIES];
+	void *res = NULL, *p;
+	int n = 0;
+
+	/* The kernel allocator takes no placement hint: retry until the (contiguous) block ends below the limit */
+	while (n < USB_DMA_RETRIES) {
+		p = usb_mmapUncached(size);
+		if (p == NULL) {
+			break;
+		}
+		if ((unsigned long long)va2pa(p) + size <= USB_DMA_LIMIT) {
+			res = p;
+			break;
+		}
+		held[n++] = p;
+	}
+
+	while (n > 0) {
+		munmap(held[--n], size);
+	}
+
+	if (res == NULL) {
+		fprintf(stderr, "usb: no DMA memory below 0x%llx for %zu bytes\n", USB_DMA_LIMIT, size);
+	}
+
+	return res;
+#else
+	return usb_mmapUncached(size);
+#endif
 }
 
 
