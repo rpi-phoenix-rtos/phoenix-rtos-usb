@@ -421,6 +421,18 @@ static void hub_portstatus(usb_dev_t *hub, int port)
 	if (status.wPortChange & USB_PORT_STAT_C_RESET)
 		hub_clearPortFeature(hub, port, USB_PORT_FEAT_C_RESET);
 
+	/* Acknowledge every change reported, not only the ones acted on. A change
+	 * left set keeps the port in the hub's status-change bitmap, so the hub
+	 * reports it again on every poll and the port is queried forever. */
+	if (status.wPortChange & USB_PORT_STAT_C_SUSPEND)
+		hub_clearPortFeature(hub, port, USB_PORT_FEAT_C_SUSPEND);
+
+	if (status.wPortChange & USB_PORT_STAT_C_OVERCURRENT) {
+		hub_clearPortFeature(hub, port, USB_PORT_FEAT_C_OVER_CURRENT);
+		log_error("over-current on port %d %s\n", port,
+			(status.wPortStatus & USB_PORT_STAT_OVERCURRENT) ? "began" : "ended");
+	}
+
 	if (connection)
 		hub_connectstatus(hub, port, &status);
 }
