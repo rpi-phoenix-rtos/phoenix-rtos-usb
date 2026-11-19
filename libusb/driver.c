@@ -109,10 +109,14 @@ int usb_setConfiguration(usb_driver_t *drv, unsigned pipe, int conf)
 }
 
 
+/* `ep` is the endpoint ADDRESS (bEndpointAddress: number | 0x80 for IN). The
+ * request addresses an endpoint, so its recipient is the endpoint (USB 2.0
+ * section 9.4.1); sent to the device instead, it is a request for a device
+ * feature that does not exist and a conforming device STALLs it. */
 int usb_clearFeatureHalt(usb_driver_t *drv, unsigned pipe, int ep)
 {
 	usb_setup_packet_t setup = (usb_setup_packet_t) {
-		.bmRequestType = REQUEST_DIR_HOST2DEV | REQUEST_TYPE_STANDARD | REQUEST_RECIPIENT_DEVICE,
+		.bmRequestType = REQUEST_DIR_HOST2DEV | REQUEST_TYPE_STANDARD | REQUEST_RECIPIENT_ENDPOINT,
 		.bRequest = REQ_CLEAR_FEATURE,
 		.wValue = USB_ENDPOINT_HALT,
 		.wIndex = ep,
