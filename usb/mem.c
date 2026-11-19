@@ -24,7 +24,7 @@
 /* Issue #121 — the free-list head was intermittently found smashed with
  * non-pointer (recycled DRAM) bytes during early USB enumeration. ROOT-CAUSED
  * AND FIXED: stale dirty cache lines left by a prior cached owner of the page
- * were evicted over the pool (usb `12c4fe8`, the dc-civac in usb_allocBuffer
+ * were evicted over the pool (usb `12c4fe8`, the dc-civac in usb_mmapUncached
  * below). The archaeology this file carried to find that writer — rings of
  * recent allocs and frees, and the caller-PC walk that named the adjacent
  * overflow suspect — has done its job and is gone; it cost work on every
@@ -55,12 +55,6 @@ typedef struct usb_buf {
 } usb_buf_t;
 
 
-static struct {
-	usb_buf_t *buffer;
-	handle_t lock;
-} usb_mem_common;
-
-
 /* Dump the bytes of a smashed free-list node, so a recurrence says what wrote
  * there instead of only that something did: identifiable USB descriptor/report
  * bytes name a source class, plain text names another. Caller must hold the pool
@@ -86,11 +80,11 @@ static void usb_memReportCorrupt(const usb_buf_t *buf, const struct usb_chunk_hd
 }
 
 
-/* A usb_buf_t* must be USB_BUF_SIZE-aligned (every pool buffer comes from
- * usb_allocAligned(USB_BUF_SIZE, USB_BUF_SIZE)). An overflow that smashes a
- * buffer header's buf->next field (offset 0) leaves a non-aligned wild pointer
- * there; reject it before usb_allocFrom recurses into it and faults dereferencing
- * string bytes as a usb_buf_t (#121). NULL is valid (end of the buffer chain). */
+/* A usb_buf_t* must be USB_BUF_SIZE-aligned (every chunk buffer is a page from
+ * _usb_allocBuffer()). An overflow that smashes a buffer header's buf->next
+ * field (offset 0) leaves a non-aligned wild pointer there; reject it before
+ * usb_allocFrom recurses into it and faults dereferencing string bytes as a
+ * usb_buf_t (#121). NULL is valid (end of the buffer chain). */
 static int usb_bufSane(const usb_buf_t *buf)
 {
 	if (buf == NULL) {
@@ -106,10 +100,32 @@ static int usb_bufSane(const usb_buf_t *buf)
  * 4 GiB (the device tree's dma-ranges stops at 3 GiB). It shows only under
  * memory pressure: silently corrupted reads, then an xHCI Host System Error. */
 #define USB_DMA_LIMIT 0xc0000000ULL
+
+/* Under memory pressure there may be no free memory below USB_DMA_LIMIT left to
+ * map, so everything the stack needs in normal operation is reserved when it
+ * starts (see the DMA page pool below). In pages:
+ *  - VL805 xHCI controller: DCBAA, command ring, event ring, ERST, scratchpad
+ *    array and the shared input context take a page each (6), plus 31
+ *    scratchpad buffers (HCSPARAMS2 Max Scratchpad Buffers)               37
+ *  - devices: an output context and an EP0 ring each (2), plus a transfer
+ *    ring per other endpoint: the VL805's USB 2.0 hub, a keyboard and a
+ *    mouse (3 each) and two mass-storage devices (4 each)                 17
+ *  - pages carved into small blocks by usb_alloc() (setup packets, CBW/CSW,
+ *    hub status, interrupt reports: 127 blocks per page)                  2
+ *  - transfer buffers: umass moves at most UMASS_MAX_IO (64 KiB) per SCSI
+ *    command and issues one command per device at a time; two devices     32
+ * 88 pages, i.e. two 256 KiB pool segments. */
+#define USB_DMA_RESERVE_PAGES (37U + 17U + 2U + 32U)
 #endif
 
 /* Rejected allocations are held while retrying, so the allocator hands out other pages */
 #define USB_DMA_RETRIES 32
+
+/* DMA memory reserved when the stack starts, in pages. Zero: no pool, every
+ * block of a page or more is mapped when it is needed and unmapped when freed. */
+#ifndef USB_DMA_RESERVE_PAGES
+#define USB_DMA_RESERVE_PAGES 0U
+#endif
 
 
 static void *usb_mmapUncached(size_t size)
@@ -182,12 +198,11 @@ static void *usb_allocUncached(size_t size)
 }
 
 
-void *usb_allocAligned(size_t size, size_t alignment)
+/* A block of its own, unmapped again when freed: used without a pool, and when
+ * the pool cannot serve a request. 'size' and 'alignment' are whole pages. */
+static void *usb_allocDirect(size_t size, size_t alignment)
 {
 	char *addr, *res;
-
-	size = (size + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
-	alignment = (alignment + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
 
 	if ((addr = usb_allocUncached(size)) == NULL)
 		return NULL;
@@ -215,18 +230,239 @@ void *usb_allocAligned(size_t size, size_t alignment)
 }
 
 
-void usb_freeAligned(void *ptr, size_t size)
+/*
+ * DMA page pool
+ *
+ * Blocks of a page or more (rings, contexts, the pages usb_alloc() carves into
+ * small blocks, transfer buffers) are carved out of physically contiguous
+ * segments and go back to them when freed, instead of being mapped for every
+ * transfer. With USB_DMA_LIMIT, memory below the limit may not be available
+ * when the system is under memory pressure, which is exactly when the stack
+ * would otherwise need a new transfer buffer; so USB_DMA_RESERVE_PAGES are
+ * reserved when the stack starts. The pool grows by a segment when it runs out
+ * (a newly plugged device, say); that can fail under pressure like any other
+ * allocation, and the request then falls back to a block of its own.
+ *
+ * A run of pages starts at a physical address aligned to its size rounded up
+ * to a power of two, up to 64 KiB: a block of up to 64 KiB never spans a 64 KiB
+ * boundary, which xHCI TRB data buffers must not do, as with the kernel's buddy
+ * allocator before. Single pages, mostly long-lived, are taken from the bottom
+ * of the pool and longer runs from the top, so that the rings and contexts of
+ * hot-plugged devices do not break up the runs transfer buffers need.
+ */
+
+#define USB_POOL_SEG_PAGES 64U /* one bitmap word per segment */
+#define USB_POOL_SEG_SIZE  ((size_t)USB_POOL_SEG_PAGES * _PAGE_SIZE)
+#define USB_POOL_SEGS_MAX  16U /* 4 MiB; beyond it every block is one of its own */
+#define USB_POOL_BOUNDARY  (0x10000U / _PAGE_SIZE) /* 64 KiB, in pages */
+
+
+typedef struct {
+	char *base;
+	addr_t pa;
+	uint64_t used; /* bit n set: page n is allocated */
+} usb_poolSeg_t;
+
+
+static struct {
+	usb_buf_t *buffer;
+	usb_poolSeg_t segs[USB_POOL_SEGS_MAX];
+	unsigned int nsegs;
+	handle_t lock;
+} usb_mem_common;
+
+
+static uint64_t usb_poolRunMask(unsigned int npages)
 {
-	munmap(ptr, size);
+	return (npages >= 64U) ? ~(uint64_t)0 : (((uint64_t)1 << npages) - 1U);
 }
 
 
-static usb_buf_t *usb_allocBuffer(void)
+/* Caller must hold the lock */
+static int _usb_poolGrow(void)
+{
+	usb_poolSeg_t *seg;
+	char *base;
+
+	if (usb_mem_common.nsegs >= USB_POOL_SEGS_MAX) {
+		return -1;
+	}
+
+	base = usb_allocUncached(USB_POOL_SEG_SIZE);
+	if (base == NULL) {
+		return -1;
+	}
+
+	seg = &usb_mem_common.segs[usb_mem_common.nsegs++];
+	seg->base = base;
+	seg->pa = va2pa(base);
+	seg->used = 0;
+
+	return 0;
+}
+
+
+/* Start page of a free run of 'npages' in 'seg' whose physical page number is a
+ * multiple of 'align': the lowest one, or with 'fromTop' the highest. -1 if none. */
+static int usb_poolSegFit(const usb_poolSeg_t *seg, unsigned int npages, unsigned int align, int fromTop)
+{
+	uint64_t mask = usb_poolRunMask(npages);
+	unsigned int i = (align - (unsigned int)((seg->pa / _PAGE_SIZE) % align)) % align;
+	int found = -1;
+
+	for (; i + npages <= USB_POOL_SEG_PAGES; i += align) {
+		if ((seg->used & (mask << i)) == 0U) {
+			found = (int)i;
+			if (fromTop == 0) {
+				break;
+			}
+		}
+	}
+
+	return found;
+}
+
+
+/* Caller must hold the lock */
+static int _usb_poolFind(unsigned int npages, unsigned int align, usb_poolSeg_t **seg)
+{
+	int fromTop = (npages > 1U) ? 1 : 0;
+	unsigned int i, n = usb_mem_common.nsegs;
+	int start;
+
+	for (i = 0; i < n; i++) {
+		*seg = &usb_mem_common.segs[(fromTop != 0) ? (n - 1U - i) : i];
+		start = usb_poolSegFit(*seg, npages, align, fromTop);
+		if (start >= 0) {
+			return start;
+		}
+	}
+
+	return -1;
+}
+
+
+/* Caller must hold the lock. 'size' and 'alignment' are whole pages. */
+static void *_usb_poolAlloc(size_t size, size_t alignment)
+{
+	unsigned int npages, align = 1;
+	usb_poolSeg_t *seg;
+	int start;
+
+	if ((size > USB_POOL_SEG_SIZE) || (alignment > USB_POOL_SEG_SIZE)) {
+		return NULL;
+	}
+
+	npages = (unsigned int)(size / _PAGE_SIZE);
+	while ((align < npages) && (align < USB_POOL_BOUNDARY)) {
+		align <<= 1;
+	}
+	if (align < alignment / _PAGE_SIZE) {
+		align = (unsigned int)(alignment / _PAGE_SIZE);
+	}
+
+	start = _usb_poolFind(npages, align, &seg);
+	if ((start < 0) && (USB_DMA_RESERVE_PAGES != 0U) && (_usb_poolGrow() == 0)) {
+		fprintf(stderr, "usb: DMA pool grown to %u KiB\n", usb_mem_common.nsegs * (unsigned int)(USB_POOL_SEG_SIZE / 1024U));
+		start = _usb_poolFind(npages, align, &seg);
+	}
+	if (start < 0) {
+		return NULL;
+	}
+
+	seg->used |= usb_poolRunMask(npages) << start;
+
+	return seg->base + (size_t)start * _PAGE_SIZE;
+}
+
+
+/* Caller must hold the lock. Returns 0 if 'ptr' is not pool memory. */
+static int _usb_poolFree(void *ptr, size_t size)
+{
+	uintptr_t p = (uintptr_t)ptr, base;
+	unsigned int i, start, npages = (unsigned int)(size / _PAGE_SIZE);
+
+	for (i = 0; i < usb_mem_common.nsegs; i++) {
+		base = (uintptr_t)usb_mem_common.segs[i].base;
+		if ((p >= base) && (p < base + USB_POOL_SEG_SIZE)) {
+			start = (unsigned int)((p - base) / _PAGE_SIZE);
+			if ((start + npages > USB_POOL_SEG_PAGES) || (((p - base) % _PAGE_SIZE) != 0U)) {
+				fprintf(stderr, "usb_mem: bad free of %zu bytes at %p, leaking it\n", size, ptr);
+			}
+			else {
+				usb_mem_common.segs[i].used &= ~(usb_poolRunMask(npages) << start);
+			}
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+
+/* Caller must hold the lock. 'size' and 'alignment' are whole pages. Not cleared. */
+static void *_usb_allocPages(size_t size, size_t alignment)
+{
+	void *res = _usb_poolAlloc(size, alignment);
+
+	if (res == NULL) {
+		res = usb_allocDirect(size, alignment);
+	}
+
+	return res;
+}
+
+
+/* Caller must hold the lock. 'size' is whole pages. */
+static void _usb_freePages(void *ptr, size_t size)
+{
+	if (_usb_poolFree(ptr, size) == 0) {
+		munmap(ptr, size);
+	}
+}
+
+
+void *usb_allocAligned(size_t size, size_t alignment)
+{
+	void *res;
+
+	size = (size + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
+	alignment = (alignment + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
+
+	mutexLock(usb_mem_common.lock);
+	res = _usb_allocPages(size, alignment);
+	mutexUnlock(usb_mem_common.lock);
+
+	/* Pool pages are recycled: clear them, as a fresh mapping would be */
+	if (res != NULL) {
+		memset(res, 0, size);
+	}
+
+	return res;
+}
+
+
+void usb_freeAligned(void *ptr, size_t size)
+{
+	if (ptr == NULL) {
+		return;
+	}
+
+	size = (size + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
+
+	mutexLock(usb_mem_common.lock);
+	_usb_freePages(ptr, size);
+	mutexUnlock(usb_mem_common.lock);
+}
+
+
+/* Caller must hold the lock */
+static usb_buf_t *_usb_allocBuffer(void)
 {
 	struct usb_chunk_hdr *hdr;
 	usb_buf_t *buf;
 
-	buf = usb_allocAligned(USB_BUF_SIZE, USB_BUF_SIZE);
+	buf = _usb_allocPages(USB_BUF_SIZE, USB_BUF_SIZE);
 	if (buf == NULL)
 		return NULL;
 
@@ -322,7 +558,7 @@ static void *usb_allocFrom(usb_buf_t *buf, size_t size)
 
 		/* Alloc next buffer */
 		if (buf->next == NULL) {
-			if ((buf->next = usb_allocBuffer()) == NULL)
+			if ((buf->next = _usb_allocBuffer()) == NULL)
 				return NULL;
 		}
 
@@ -361,7 +597,7 @@ void usb_free(void *ptr, size_t size)
 
 	size = (size + (USB_CHUNK_SIZE - 1)) & ~(USB_CHUNK_SIZE - 1);
 	if (size > USB_BUF_SIZE - USB_CHUNK_SIZE) {
-		munmap(ptr, size);
+		usb_freeAligned(ptr, size);
 		return;
 	}
 
@@ -431,12 +667,17 @@ void *usb_alloc(size_t size)
 		return NULL;
 
 	size = (size + (USB_CHUNK_SIZE - 1)) & ~(USB_CHUNK_SIZE - 1);
-	/* Don't manage larger buffers */
-	if (size > USB_BUF_SIZE - USB_CHUNK_SIZE)
-		return usb_allocAligned(size, USB_BUF_SIZE);
 
 	mutexLock(usb_mem_common.lock);
-	ret = usb_allocFrom(usb_mem_common.buffer, size);
+	if (size > USB_BUF_SIZE - USB_CHUNK_SIZE) {
+		/* Whole pages: transfer buffers, which are not cleared here, as the
+		 * caller fills them (OUT) or usb_transferSubmit() clears them (IN) */
+		size = (size + (_PAGE_SIZE - 1)) & ~(_PAGE_SIZE - 1);
+		ret = _usb_allocPages(size, _PAGE_SIZE);
+	}
+	else {
+		ret = usb_allocFrom(usb_mem_common.buffer, size);
+	}
 	mutexUnlock(usb_mem_common.lock);
 
 	return ret;
@@ -445,8 +686,30 @@ void *usb_alloc(size_t size)
 
 int usb_memInit(void)
 {
-	if ((usb_mem_common.buffer = usb_allocBuffer()) == NULL)
+	unsigned int i, nsegs = (USB_DMA_RESERVE_PAGES + USB_POOL_SEG_PAGES - 1U) / USB_POOL_SEG_PAGES;
+
+	if (mutexCreate(&usb_mem_common.lock) != 0)
 		return -1;
 
-	return mutexCreate(&usb_mem_common.lock);
+	mutexLock(usb_mem_common.lock);
+
+	/* Not fatal: the pool grows on demand, and a request it cannot serve gets a block of its own */
+	for (i = 0; i < nsegs; i++) {
+		if (_usb_poolGrow() != 0) {
+			fprintf(stderr, "usb: reserved %u of %u KiB of DMA memory\n", i * (unsigned int)(USB_POOL_SEG_SIZE / 1024U),
+				nsegs * (unsigned int)(USB_POOL_SEG_SIZE / 1024U));
+			break;
+		}
+	}
+
+	usb_mem_common.buffer = _usb_allocBuffer();
+
+	mutexUnlock(usb_mem_common.lock);
+
+	if (usb_mem_common.buffer == NULL) {
+		resourceDestroy(usb_mem_common.lock);
+		return -1;
+	}
+
+	return 0;
 }
